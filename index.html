@@ -65,7 +65,6 @@
 <div id="map"></div>
 
 <script>
-    // Initialize Map
     const map = L.map('map').setView([32.0853, 34.7818], 13);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
@@ -73,18 +72,15 @@
     let markers = [];
     let polylines = [];
 
-    // Map Click Handler
     map.on('click', function(e) {
         nodes.push({ lat: e.latlng.lat, lng: e.latlng.lng });
         updateUI();
     });
 
     function updateUI() {
-        // Sync Textarea
         const textarea = document.getElementById('nodeList');
         textarea.value = nodes.map(n => `${n.lat.toFixed(5)}, ${n.lng.toFixed(5)}`).join('\n');
         
-        // Update Markers
         markers.forEach(m => map.removeLayer(m));
         markers = [];
         
@@ -115,14 +111,11 @@
             }
         });
         updateUI();
-        
-        // Auto-center map to the first node if it exists
         if(nodes.length > 0) {
             map.setView([nodes[0].lat, nodes[0].lng], 13);
         }
     }
 
-    // --- Math & GIS Helpers ---
     function getDistance(lat1, lon1, lat2, lon2) {
         const R = 6371; 
         const p = Math.PI / 180;
@@ -146,16 +139,13 @@
         return diff;
     }
 
-    // --- Line of Sight via OpenTopoData ---
     async function checkLineOfSight(nodeA, nodeB, height) {
         const locations = `${nodeA.lat},${nodeA.lng}|${nodeB.lat},${nodeB.lng}`;
         const url = `https://api.opentopodata.org/v1/srtm90m?locations=${locations}&samples=10`;
         
         try {
             const response = await fetch(url);
-            if(response.status === 429) {
-                throw new Error("Rate limit hit");
-            }
+            if(response.status === 429) throw new Error("Rate limit");
             const data = await response.json();
             if(!data.results || data.results.length < 10) return true;
 
@@ -165,20 +155,17 @@
             for(let i = 1; i < 9; i++) {
                 const expectedLineElevation = hA + ((hB - hA) * (i / 9));
                 const actualGround = data.results[i].elevation;
-                if(actualGround > expectedLineElevation) {
-                    return false; 
-                }
+                if(actualGround > expectedLineElevation) return false; 
             }
             return true;
         } catch (e) {
-            console.warn("LoS check failed/rate limited. Assuming Clear LoS.", e);
+            console.warn("LoS check failed/rate limited. Assuming Clear LoS.");
             return true; 
         }
     }
 
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    // --- Main Planning Algorithm ---
     async function runPlanningTool() {
         if(nodes.length < 2) return alert("Add at least 2 nodes.");
         
@@ -198,6 +185,7 @@
 
         statusEl.innerText = `Fetching Elevation Profiles (0/${totalChecks}) - Please wait 1 sec per link...`;
 
+        // 1. Build Full LoS Graph
         for(let i = 0; i < nodes.length; i++) {
             for(let j = i + 1; j < nodes.length; j++) {
                 await sleep(1100); 
@@ -208,7 +196,9 @@
                 if(hasLoS) {
                     let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
                     let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
-                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lat);
+                    
+                    // FIXED: Replaced nodes[i].lat with nodes[i].lng
+                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
                     
                     edges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI });
                     edges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ });
@@ -219,6 +209,7 @@
         statusEl.innerText = "Running Modified Prim's Algorithm...";
         await sleep(500); 
 
+        // 2. Algorithm Execution
         let inTree = new Set([popIdx]);
         let treeEdges = [];
         let nodeBearings = Array(nodes.length).fill().map(() => []); 
@@ -265,25 +256,39 @@
             totalDistance += bestEdge.dist;
             if(edgeAngleViolates) angleViolations++;
 
+            // Record vector angles for future comparisons at these nodes
             nodeBearings[bestEdge.u].push(bestEdge.bUV);
             nodeBearings[bestEdge.v].push(bestEdge.bVU);
         }
 
+        // 3. Visualization
         polylines.forEach(p => map.removeLayer(p));
         polylines = [];
 
+        // Draw background mesh (Available LoS links)
+        edges.forEach(edge => {
+            if (edge.u < edge.v) { // Prevent drawing duplicate overlapping lines
+                const losLine = L.polyline([
+                    [nodes[edge.u].lat, nodes[edge.u].lng], 
+                    [nodes[edge.v].lat, nodes[edge.v].lng]
+                ], {color: '#888', weight: 1.5, dashArray: '5, 5', opacity: 0.6}).addTo(map);
+                polylines.push(losLine);
+            }
+        });
+
+        // Draw foreground tree (Chosen Topology)
         treeEdges.forEach(edge => {
             let violates = false;
             let othersU = nodeBearings[edge.u].filter(b => b !== edge.bUV);
             for(let b of othersU) { if(getAngleDifference(b, edge.bUV) < threshold) violates = true; }
 
             const color = violates ? 'red' : 'green';
-            const weight = violates ? 4 : 3;
+            const weight = violates ? 5 : 4;
             
             const line = L.polyline([
                 [nodes[edge.u].lat, nodes[edge.u].lng], 
                 [nodes[edge.v].lat, nodes[edge.v].lng]
-            ], {color: color, weight: weight}).addTo(map);
+            ], {color: color, weight: weight, opacity: 1}).addTo(map);
             polylines.push(line);
         });
 
@@ -297,3 +302,4 @@
 
 </body>
 </html>
+

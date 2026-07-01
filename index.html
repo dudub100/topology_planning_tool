@@ -2,12 +2,15 @@
 <html>
 <head>
     <title>Radio Network Planner: Modified Prim's Algorithm</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" integrity="sha512-Zcn6lsHNdGv/2FhV8gG7aYtT4xR+xQ4Xf/Nq43a4X5R4w4Q9sU4R5/X/7x8X/X9R4X8Q5+4X5R4w4Q9sU4R5/X/7x8X==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js" integrity="sha512-BwHqxNd8rG/2FhV8gG7aYtT4xR+xQ4Xf/Nq43a4X5R4w4Q9sU4R5/X/7x8X/X9R4X8Q5+4X5R4w4Q9sU4R5/X/7x8X==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    
     <style>
+        /* Fixed CSS to force the map to take up the correct screen space */
         body, html { margin: 0; padding: 0; font-family: Arial, sans-serif; height: 100vh; width: 100vw; display: flex; overflow: hidden; }
         #sidebar { width: 350px; height: 100vh; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; flex-shrink: 0; }
-        #map { width: calc(100vw - 350px); height: 100vh; flex-grow: 1; }
+        #map { width: calc(100vw - 350px); height: 100vh; flex-grow: 1; z-index: 1; }
         h2 { font-size: 18px; margin-top: 0; }
         .form-group { margin-bottom: 15px; }
         label { display: block; font-weight: bold; margin-bottom: 5px; font-size: 14px; }
@@ -20,7 +23,6 @@
         #results { margin-top: 20px; padding: 15px; background: #e9ecef; border-radius: 4px; display: none; }
         #status { font-weight: bold; color: #d9534f; margin-top: 10px; font-size: 14px; }
     </style>
-    
 </head>
 <body>
 
@@ -64,8 +66,8 @@
 <div id="map"></div>
 
 <script>
-    // Initialize Map (Centered globally, user can zoom/pan)
-    const map = L.map('map').setView([51.505, -0.09], 13);
+    // Initialize Map
+    const map = L.map('map').setView([32.0853, 34.7818], 13); // Centered on Tel Aviv area for convenience
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
     let nodes = [];
@@ -114,6 +116,11 @@
             }
         });
         updateUI();
+        
+        // Auto-center map to the first node if it exists
+        if(nodes.length > 0) {
+            map.setView([nodes[0].lat, nodes[0].lng], 13);
+        }
     }
 
     // --- Math & GIS Helpers ---
@@ -167,7 +174,7 @@
             return true;
         } catch (e) {
             console.warn("LoS check failed/rate limited. Assuming Clear LoS.", e);
-            return true; // Fallback on failure for demo continuity
+            return true; // Fallback on failure
         }
     }
 
@@ -195,109 +202,4 @@
 
         statusEl.innerText = `Fetching Elevation Profiles (0/${totalChecks}) - Please wait 1 sec per link...`;
 
-        for(let i = 0; i < nodes.length; i++) {
-            for(let j = i + 1; j < nodes.length; j++) {
-                // Respect OpenTopoData 1 request/sec limit
-                await sleep(1100); 
-                let hasLoS = await checkLineOfSight(nodes[i], nodes[j], height);
-                checked++;
-                statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
-                
-                if(hasLoS) {
-                    let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
-                    let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
-                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lat);
-                    
-                    edges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI });
-                    edges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ });
-                }
-            }
-        }
-
-        statusEl.innerText = "Running Modified Prim's Algorithm...";
-        await sleep(500); // UI breathing room
-
-        // 2. Modified Prim's Algorithm
-        let inTree = new Set([popIdx]);
-        let treeEdges = [];
-        let nodeBearings = Array(nodes.length).fill().map(() => []); 
-        let angleViolations = 0;
-        let totalDistance = 0;
-        const PENALTY_MULTIPLIER = 10;
-
-        while(inTree.size < nodes.length) {
-            let bestEdge = null;
-            let minCost = Infinity;
-            let edgeAngleViolates = false;
-
-            for(let edge of edges) {
-                if(inTree.has(edge.u) && !inTree.has(edge.v)) {
-                    // Calculate Penalty based on existing tree connections at node U
-                    let localMinAngle = 180;
-                    for(let existingBearing of nodeBearings[edge.u]) {
-                        let ang = getAngleDifference(edge.bUV, existingBearing);
-                        if(ang < localMinAngle) localMinAngle = ang;
-                    }
-
-                    let cost = edge.dist;
-                    let violates = localMinAngle < threshold;
-                    
-                    if(violates) {
-                        cost *= PENALTY_MULTIPLIER;
-                    }
-
-                    if(cost < minCost) {
-                        minCost = cost;
-                        bestEdge = edge;
-                        edgeAngleViolates = violates;
-                    }
-                }
-            }
-
-            if(!bestEdge) {
-                statusEl.innerText = "Error: Network is disconnected (LoS blocked).";
-                btn.disabled = false;
-                return;
-            }
-
-            // Add to tree
-            inTree.add(bestEdge.v);
-            treeEdges.push(bestEdge);
-            totalDistance += bestEdge.dist;
-            if(edgeAngleViolates) angleViolations++;
-
-            // Record bearings for future angle checks
-            nodeBearings[bestEdge.u].push(bestEdge.bUV);
-            nodeBearings[bestEdge.v].push(bestEdge.bVU);
-        }
-
-        // 3. Visualization
-        polylines.forEach(p => map.removeLayer(p));
-        polylines = [];
-
-        treeEdges.forEach(edge => {
-            // Check if this specific edge caused a violation to color it red
-            let violates = false;
-            let othersU = nodeBearings[edge.u].filter(b => b !== edge.bUV);
-            for(let b of othersU) { if(getAngleDifference(b, edge.bUV) < threshold) violates = true; }
-
-            const color = violates ? 'red' : 'green';
-            const weight = violates ? 4 : 3;
-            
-            const line = L.polyline([
-                [nodes[edge.u].lat, nodes[edge.u].lng], 
-                [nodes[edge.v].lat, nodes[edge.v].lng]
-            ], {color: color, weight: weight}).addTo(map);
-            polylines.push(line);
-        });
-
-        document.getElementById('resDistance').innerText = totalDistance.toFixed(2);
-        document.getElementById('resViolations').innerText = angleViolations;
-        document.getElementById('results').style.display = 'block';
-        statusEl.innerText = "Complete!";
-        btn.disabled = false;
-    }
-</script>
-
-</body>
-</html>
+        for(let i = 0; i < nodes

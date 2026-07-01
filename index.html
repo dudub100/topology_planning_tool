@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Radio Network Planner: Topology & Capacity</title>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+    
+    <style>
+        body, html { margin: 0; padding: 0; font-family: Arial, sans-serif; height: 100vh; width: 100vw; display: flex; overflow: hidden; }
+        #sidebar { width: 350px; height: 100vh; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; flex-shrink: 0; }
+        #map { width: calc(100vw - 350px); height: 100vh; flex-grow: 1; z-index: 1; }
+        h2 { font-size: 16px; margin-top: 0; margin-bottom: 10px; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
+        .form-group { margin-bottom: 12px; }
+        label { display: block; font-weight: bold; margin-bottom: 4px; font-size: 13px; }
+        input[type="number"], textarea, select { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+        textarea { height: 80px; font-family: monospace; resize: vertical; }
+        button { width: 100%; padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 8px; font-weight: bold; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #218838; }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-warning:hover { background: #e0a800; }
+        .note { font-size: 11px; color: #666; margin-top: 2px; }
+        #results { margin-top: 15px; padding: 10px; background: #e9ecef; border-radius: 4px; display: none; font-size: 14px; }
+        #status { font-weight: bold; color: #d9534f; margin-top: 5px; font-size: 13px; padding-bottom: 10px;}
+        
+        /* Custom CSS for the capacity labels on the map */
+        .capacity-label {
+            background-color: rgba(255, 255, 255, 0.9);
+            border: 1px solid #333;
+            border-radius: 4px;
+            font-weight: bold;
+            color: #000;
+            font-size: 11px;
+            padding: 2px 5px;
+            white-space: nowrap;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        /* Hide the default tooltip pointer arrow */
+        .leaflet-tooltip-center::before { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>1. RF Parameters</h2>
+    <div class="form-group">
+        <label>Node Height (Meters)</label>
+        <input type="number" id="nodeHeight" value="30" min="0">
+    </div>
+    <div class="form-group">
+        <label>Angle Threshold (Degrees)</label>
+        <input type="number" id="angleThreshold" value="90" min="0" max="180">
+    </div>
+    <div class="form-group">
+        <label>Angle Penalty Multiplier</label>
+        <input type="number" id="penaltyMultiplier" value="10" min="1" step="1">
+    </div>
+
+    <h2>2. Capacity Parameters</h2>
+    <div class="form-group">
+        <label>Site Peak Capacity (Mbps)</label>
+        <input type="number" id="sitePeak" value="500" min="1">
+    </div>
+    <div class="form-group">
+        <label>Site Average Capacity (Mbps)</label>
+        <input type="number" id="siteAvg" value="100" min="1">
+    </div>
+    <div class="form-group">
+        <label>Aggregation Mode</label>
+        <select id="capacityMode">
+            <option value="regular">Regular: MAX(Sum of Avg, Peak)</option>
+            <option value="conservative">Conservative: Peak + (N-1)*Avg</option>
+        </select>
+    </div>
+
+    <h2>3. Topology Config</h2>
+    <div class="form-group">
+        <label>POP Node Index (0-based)</label>
+        <input type="number" id="popIndex" value="0" min="0">
+    </div>
+    <div class="form-group">
+        <textarea id="nodeList" placeholder="Click map to add nodes..."></textarea>
+    </div>
+    <button onclick="syncMapFromList()">Update Map from List</button>
+    <hr>
+    
+    <div id="status">Ready. Add nodes to begin.</div>
+
+    <button id="btnLos" onclick="runLoSCheck()">Stage 1: Check Line of Sight</button>
+    <button id="btnPrim" class="btn-success" onclick="runPrimsAlgorithm()" disabled>Stage 2: Run Prim's Topology</button>
+    <button id="btnCap" class="btn-warning" onclick="runCapacityPlanning()" disabled>Stage 3: Calculate Capacity</button>
+    
+    <div id="results">
+        <p style="margin: 0 0 5px 0;"><strong>Total Network Distance:</strong> <span id="resDistance">0</span> km</p>
+        <p style="margin: 0;"><strong>Angle Violations (< Threshold):</strong> <span id="resViolations">0</span></p>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<script>
+    const map = L.map('map').setView([32.0853, 34.7818], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+    let nodes = [];
+    let markers = [];
+    let losPolylines = [];
+    let treePolylines = [];
+    let globalEdges = [];
+    let finalTreeEdges = []; // Store the final tree for capacity planning
+
+    map.on('click', function(e) {
+        nodes.push({ lat: e.latlng.lat, lng: e.latlng.lng });
+        updateUI();
+    });
+
+    function updateUI() {
+        const textarea = document.getElementById('nodeList');
+        textarea.value = nodes.map(n => `${n.lat.toFixed(5)}, ${n.lng.toFixed(5)}`).join('\n');
+        
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+        
+        const popIdx = parseInt(document.getElementById('popIndex').value) || 0;
+        
+        nodes.forEach((node, i) => {
+            const isPop = i === popIdx;
+            const color = isPop ? 'red' : 'blue';
+            const marker = L.circleMarker([node.lat, node.lng], {
+                color: color, fillColor: color, fillOpacity: 0.8, radius: isPop ? 8 : 5
+            }).addTo(map).bindPopup(`Node ${i} ${isPop ? '(POP)' : ''}`);
+            markers.push(marker);
+        });
+
+        // Reset system state when nodes change
+        document.getElementById('btnPrim').disabled = true;
+        document.getElementById('btnCap').disabled = true;
+        globalEdges = [];
+        finalTreeEdges = [];
+        losPolylines.forEach(p => map.removeLayer(p));
+        treePolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
+        treePolylines = [];
+        document.getElementById('results').style.display = 'none';
+        document.getElementById('status').innerText = "Topology changed. Run Stage 1.";
+    }
+
+    function syncMapFromList() {
+        const text = document.getElementById('nodeList').value;
+        const lines = text.split('\n');
+        nodes = [];
+        lines.forEach(line => {
+            const parts = line.split(',');
+            if(parts.length === 2) {
+                const lat = parseFloat(parts[0].trim());
+                const lng = parseFloat(parts[1].trim());
+                if(!isNaN(lat) && !isNaN(lng)) nodes.push({lat, lng});
+            }
+        });
+        updateUI();
+        if(nodes.length > 0) map.setView([nodes[0].lat, nodes[0].lng], 13);
+    }
+
+    // --- Math & GIS ---
+    function getDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371; 
+        const p = Math.PI / 180;
+        const a = 0.5 - Math.cos((lat2 - lat1) * p)/2 + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lon2 - lon1) * p))/2;
+        return 2 * R * Math.asin(Math.sqrt(a));
+    }
+    function getBearing(lat1, lon1, lat2, lon2) {
+        const p = Math.PI / 180;
+        const y = Math.sin((lon2 - lon1) * p) * Math.cos(lat2 * p);
+        const x = Math.cos(lat1 * p) * Math.sin(lat2 * p) - Math.sin(lat1 * p) * Math.cos(lat2 * p) * Math.cos((lon2 - lon1) * p);
+        let brng = Math.atan2(y, x) * (180 / Math.PI);
+        return (brng + 360) % 360;
+    }
+    function getAngleDifference(b1, b2) {
+        let diff = Math.abs(b1 - b2);
+        return diff > 180 ? 360 - diff : diff;
+    }
+
+    async function checkLineOfSight(nodeA, nodeB, height) {
+        const locations = `${nodeA.lat},${nodeA.lng}|${nodeB.lat},${nodeB.lng}`;
+        const url = `https://api.opentopodata.org/v1/srtm90m?locations=${locations}&samples=10`;
+        try {
+            const response = await fetch(url);
+            if(response.status === 429) throw new Error("Rate limit");
+            const data = await response.json();
+            if(!data.results || data.results.length < 10) return true;
+
+            const hA = data.results[0].elevation + height;
+            const hB = data.results[9].elevation + height;
+            for(let i = 1; i < 9; i++) {
+                const expectedLineElevation = hA + ((hB - hA) * (i / 9));
+                const actualGround = data.results[i].elevation;
+                if(actualGround > expectedLineElevation) return false; 
+            }
+            return true;
+        } catch (e) {
+            console.warn("LoS check failed. Assuming Clear LoS.");
+            return true; 
+        }
+    }
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // --- STAGE 1: Line of Sight ---
+    async function runLoSCheck() {
+        if(nodes.length < 2) return alert("Add at least 2 nodes.");
+        
+        const height = parseFloat(document.getElementById('nodeHeight').value);
+        const statusEl = document.getElementById('status');
+        const btnLos = document.getElementById('btnLos');
+
+        btnLos.disabled = true;
+        document.getElementById('btnPrim').disabled = true;
+        document.getElementById('btnCap').disabled = true;
+        globalEdges = [];
+        
+        let totalChecks = (nodes.length * (nodes.length - 1)) / 2;
+        let checked = 0;
+
+        statusEl.innerText = `Fetching Elevation Profiles (0/${totalChecks})...`;
+
+        for(let i = 0; i < nodes.length; i++) {
+            for(let j = i + 1; j < nodes.length; j++) {
+                await sleep(1100); 
+                let hasLoS = await checkLineOfSight(nodes[i], nodes[j], height);
+                checked++;
+                statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
+                
+                if(hasLoS) {
+                    let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
+                    
+                    globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI });
+                    globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ });
+                }
+            }
+        }
+
+        losPolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
+        globalEdges.forEach(edge => {
+            if (edge.u < edge.v) { 
+                const losLine = L.polyline([
+                    [nodes[edge.u].lat, nodes[edge.u].lng], 
+                    [nodes[edge.v].lat, nodes[edge.v].lng]
+                ], {color: '#888', weight: 1.5, dashArray: '5, 5', opacity: 0.6}).addTo(map);
+                losPolylines.push(losLine);
+            }
+        });
+
+        statusEl.innerText = "Stage 1 Complete. Ready for Stage 2.";
+        btnLos.disabled = false;
+        document.getElementById('btnPrim').disabled = false;
+    }
+
+    // --- STAGE 2: Prim's Topology ---
+    function runPrimsAlgorithm() {
+        const popIdx = parseInt(document.getElementById('popIndex').value);
+        if(isNaN(popIdx) || popIdx < 0 || popIdx >= nodes.length) return alert("Invalid POP Index.");
+
+        const threshold = parseFloat(document.getElementById('angleThreshold').value);
+        const PENALTY_MULTIPLIER = parseFloat(document.getElementById('penaltyMultiplier').value);
+        const statusEl = document.getElementById('status');
+
+        let inTree = new Set([popIdx]);
+        finalTreeEdges = []; // Reset the saved tree
+        let nodeBearings = Array(nodes.length).fill().map(() => []); 
+        let angleViolations = 0;
+        let totalDistance = 0;
+
+        while(inTree.size < nodes.length) {
+            let bestEdge = null;
+            let minCost = Infinity;
+            let edgeAngleViolates = false;
+
+            for(let edge of globalEdges) {
+                if(inTree.has(edge.u) && !inTree.has(edge.v)) {
+                    let localMinAngle = 180;
+                    for(let existingBearing of nodeBearings[edge.u]) {
+                        let ang = getAngleDifference(edge.bUV, existingBearing);
+                        if(ang < localMinAngle) localMinAngle = ang;
+                    }
+
+                    let cost = edge.dist;
+                    let violates = localMinAngle < threshold;
+                    if(violates) cost *= PENALTY_MULTIPLIER;
+
+                    if(cost < minCost) {
+                        minCost = cost;
+                        bestEdge = edge;
+                        edgeAngleViolates = violates;
+                    }
+                }
+            }
+
+            if(!bestEdge) return alert("Error: Network is disconnected (LoS blocked).");
+
+            inTree.add(bestEdge.v);
+            finalTreeEdges.push(bestEdge);
+            totalDistance += bestEdge.dist;
+            if(edgeAngleViolates) angleViolations++;
+
+            nodeBearings[bestEdge.u].push(bestEdge.bUV);
+            nodeBearings[bestEdge.v].push(bestEdge.bVU);
+        }
+
+        // Draw Tree
+        treePolylines.forEach(p => map.removeLayer(p));
+        treePolylines = [];
+
+        finalTreeEdges.forEach(edge => {
+            let violates = false;
+            let othersU = nodeBearings[edge.u].filter(b => b !== edge.bUV);
+            for(let b of othersU) { if(getAngleDifference(b, edge.bUV) < threshold) violates = true; }
+
+            const color = violates ? 'red' : 'green';
+            
+            const line = L.polyline([
+                [nodes[edge.u].lat, nodes[edge.u].lng], 
+                [nodes[edge.v].lat, nodes[edge.v].lng]
+            ], {color: color, weight: 5, opacity: 1}).addTo(map);
+            
+            // Store the polyline object inside the edge for Stage 3 annotations
+            edge.polyline = line; 
+            treePolylines.push(line);
+        });
+
+        document.getElementById('resDistance').innerText = totalDistance.toFixed(2);
+        document.getElementById('resViolations').innerText = angleViolations;
+        document.getElementById('results').style.display = 'block';
+        statusEl.innerText = `Stage 2 Complete. Ready for Stage 3.`;
+        
+        // Enable capacity planning
+        document.getElementById('btnCap').disabled = false;
+    }
+
+    // --- STAGE 3: Capacity Planning ---
+    function runCapacityPlanning() {
+        const popIdx = parseInt(document.getElementById('popIndex').value);
+        const peakCap = parseFloat(document.getElementById('sitePeak').value);
+        const avgCap = parseFloat(document.getElementById('siteAvg').value);
+        const mode = document.getElementById('capacityMode').value;
+        const statusEl = document.getElementById('status');
+
+        if(!finalTreeEdges || finalTreeEdges.length === 0) return alert("Run Stage 2 First.");
+
+        // 1. Build Adjacency List for the Tree
+        let adj = Array(nodes.length).fill().map(() => []);
+        finalTreeEdges.forEach(edge => {
+            adj[edge.u].push(edge.v);
+            adj[edge.v].push(edge.u);
+        });
+
+        let subtreeSize = Array(nodes.length).fill(0);
+        let parentOf = Array(nodes.length).fill(-1);
+
+        // 2. Post-Order Traversal (DFS) to find parent-child directions & count downstream nodes
+        function dfs(curr, parent) {
+            parentOf[curr] = parent;
+            let size = 1; // Count itself
+            for(let nxt of adj[curr]) {
+                if(nxt !== parent) {
+                    size += dfs(nxt, curr);
+                }
+            }
+            subtreeSize[curr] = size;
+            return size;
+        }
+
+        // Root the tree at the POP
+        dfs(popIdx, -1);
+
+        // 3. Process each edge, calculate capacity, and annotate the map
+        finalTreeEdges.forEach(edge => {
+            // Determine which node is the "child" in this specific link relationship
+            let childNode = (parentOf[edge.u] === edge.v) ? edge.u : edge.v;
+            
+            // The number of downstream nodes relying on this link is the size of the child's subtree
+            let N = subtreeSize[childNode];
+            let requiredCapacity = 0;
+
+            if (mode === 'regular') {
+                requiredCapacity = Math.max(N * avgCap, peakCap);
+            } else if (mode === 'conservative') {
+                requiredCapacity = peakCap + ((N - 1) * avgCap);
+            }
+
+            // Remove any old tooltips
+            edge.polyline.unbindTooltip();
+            
+            // Add the new capacity label centered on the line
+            edge.polyline.bindTooltip(`${requiredCapacity} Mbps`, {
+                permanent: true, 
+                direction: 'center', 
+                className: 'capacity-label'
+            }).openTooltip();
+        });
+
+        statusEl.innerText = "Stage 3 Complete. Capacities generated.";
+    }
+</script>
+
+</body>
+</html>

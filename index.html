@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Radio Network Planner: Topology & Capacity</title>
+    <title>Radio Network Planner: Topology, Capacity & CSV</title>
     
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
@@ -22,6 +22,10 @@
         .btn-success:hover { background: #218838; }
         .btn-warning { background: #ffc107; color: #333; }
         .btn-warning:hover { background: #e0a800; }
+        .btn-info { background: #17a2b8; }
+        .btn-info:hover { background: #138496; }
+        .btn-secondary { background: #6c757d; margin-top: 10px; }
+        .btn-secondary:hover { background: #5a6268; }
         .note { font-size: 11px; color: #666; margin-top: 2px; }
         #results { margin-top: 15px; padding: 10px; background: #e9ecef; border-radius: 4px; display: none; font-size: 14px; }
         #status { font-weight: bold; color: #d9534f; margin-top: 5px; font-size: 13px; padding-bottom: 10px;}
@@ -82,12 +86,17 @@
     <div class="form-group">
         <label>POP Indices (Comma Separated)</label>
         <input type="text" id="popIndices" value="0">
-        <div class="note">Example: 0, 4, 12</div>
     </div>
     <div class="form-group">
         <textarea id="nodeList" placeholder="Click map to add nodes..."></textarea>
     </div>
-    <button onclick="syncMapFromList()">Update Map from List</button>
+    
+    <div style="display: flex; gap: 5px;">
+        <button class="btn-info" onclick="syncMapFromList()" style="flex: 1;">Update Map</button>
+        <input type="file" id="csvFileInput" accept=".csv" style="display: none;" onchange="importCSV(event)">
+        <button class="btn-info" onclick="document.getElementById('csvFileInput').click()" style="flex: 1;">Upload CSV</button>
+    </div>
+    
     <hr>
     
     <div id="status">Ready. Add nodes to begin.</div>
@@ -100,13 +109,14 @@
         <p style="margin: 0 0 5px 0;"><strong>Total Network Distance:</strong> <span id="resDistance">0</span> km</p>
         <p style="margin: 0 0 5px 0;"><strong>Nodal Violations:</strong> <span id="resViolations">0</span></p>
         <p style="margin: 0;"><strong>Crossing Violations:</strong> <span id="resCrossViolations">0</span></p>
+        
+        <button id="btnExport" class="btn-secondary" onclick="exportToCSV()" disabled>Download Topology (CSV)</button>
     </div>
 </div>
 
 <div id="map"></div>
 
 <script>
-    // Initialize centered near Kefar Sava/Center District
     const map = L.map('map').setView([32.175, 34.906], 12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
@@ -118,6 +128,7 @@
     let treePolylines = [];
     let globalEdges = [];
     let finalTreeEdges = []; 
+    let nodeOrphanStatus = []; // Track orphan status globally for export
 
     map.on('click', function(e) {
         nodes.push({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -126,7 +137,7 @@
 
     function getPopIndices() {
         const raw = document.getElementById('popIndices').value;
-        if (!raw) return [0];
+        if (!raw) return [];
         return raw.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n) && n >= 0 && n < nodes.length);
     }
 
@@ -155,6 +166,7 @@
 
         document.getElementById('btnPrim').disabled = true;
         document.getElementById('btnCap').disabled = true;
+        document.getElementById('btnExport').disabled = true;
         globalEdges = [];
         finalTreeEdges = [];
         losPolylines.forEach(p => map.removeLayer(p));
@@ -173,7 +185,7 @@
         nodes = [];
         lines.forEach(line => {
             const parts = line.split(',');
-            if(parts.length === 2) {
+            if(parts.length >= 2) {
                 const lat = parseFloat(parts[0].trim());
                 const lng = parseFloat(parts[1].trim());
                 if(!isNaN(lat) && !isNaN(lng)) nodes.push({lat, lng});
@@ -181,6 +193,60 @@
         });
         updateUI();
         if(nodes.length > 0) map.setView([nodes[0].lat, nodes[0].lng], 13);
+    }
+
+    // --- CSV Import Function ---
+    function importCSV(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const text = e.target.result;
+            const lines = text.split('\n');
+            nodes = [];
+            lines.forEach(line => {
+                const parts = line.split(',');
+                if(parts.length >= 2) {
+                    const lat = parseFloat(parts[0].trim());
+                    const lng = parseFloat(parts[1].trim());
+                    // Ignore header strings or invalid rows
+                    if(!isNaN(lat) && !isNaN(lng)) nodes.push({lat, lng});
+                }
+            });
+            updateUI();
+            if(nodes.length > 0) map.setView([nodes[0].lat, nodes[0].lng], 13);
+            
+            // Reset the file input so the same file can be uploaded again if needed
+            document.getElementById('csvFileInput').value = ""; 
+        };
+        reader.readAsText(file);
+    }
+
+    // --- CSV Export Function ---
+    function exportToCSV() {
+        if(finalTreeEdges.length === 0) return alert("No network data to export.");
+        
+        let csvContent = "data:text/csv;charset=utf-8,";
+        csvContent += "From Node,From Lat,From Lng,To Node,To Lat,To Lng,Distance (km),Capacity (Mbps),Status\n";
+        
+        finalTreeEdges.forEach(edge => {
+            const status = nodeOrphanStatus[edge.u] ? "Stranded Island" : "Connected to POP";
+            const cap = edge.requiredCapacity || "0"; 
+            
+            const row = `${edge.u},${nodes[edge.u].lat.toFixed(5)},${nodes[edge.u].lng.toFixed(5)},` +
+                        `${edge.v},${nodes[edge.v].lat.toFixed(5)},${nodes[edge.v].lng.toFixed(5)},` +
+                        `${edge.dist.toFixed(2)},${cap},${status}`;
+            
+            csvContent += row + "\n";
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", "network_topology_plan.csv");
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
     }
 
     // --- Math & GIS Helpers ---
@@ -216,7 +282,6 @@
     // --- STAGE 1: Strict Line of Sight ---
     async function checkLineOfSight(nodeA, nodeB, height) {
         const totalDistKm = getDistance(nodeA.lat, nodeA.lng, nodeB.lat, nodeB.lng);
-        
         let SAMPLES = Math.floor((totalDistKm * 1000) / 90);
         if (SAMPLES < 10) SAMPLES = 10;
         if (SAMPLES > 80) SAMPLES = 80;
@@ -230,7 +295,6 @@
         }
         
         const url = `https://api.open-meteo.com/v1/elevation?latitude=${lats.join(',')}&longitude=${lngs.join(',')}`;
-        
         let elevations = [];
         try {
             const response = await fetch(url);
@@ -244,9 +308,7 @@
             console.warn("Elevation API failed.");
         }
 
-        if (elevations.length < SAMPLES || elevations.some(isNaN)) {
-            return false; 
-        }
+        if (elevations.length < SAMPLES || elevations.some(isNaN)) return false; 
 
         const towerHeight = parseFloat(height) || 0;
         const hA = elevations[0] + towerHeight;
@@ -259,27 +321,18 @@
 
         for (let i = 1; i < SAMPLES - 1; i++) {
             const expectedLineElevation = hA + ((hB - hA) * (i / (SAMPLES - 1)));
-            
             const d1 = totalDistKm * (i / (SAMPLES - 1));
             const d2 = totalDistKm - d1;
             const earthBulge = (d1 * d2) / (12.75 * K_FACTOR);
             const f1 = 17.32 * Math.sqrt((d1 * d2) / (FREQ_GHZ * totalDistKm));
             const fresnelClearance = 0.6 * f1;
-            
             const actualGround = elevations[i] + earthBulge;
             const requiredClearanceHeight = actualGround + fresnelClearance;
             
             const clearanceMargin = expectedLineElevation - requiredClearanceHeight;
-            if (clearanceMargin < worstClearance) {
-                worstClearance = clearanceMargin;
-            }
-            
-            if (expectedLineElevation <= requiredClearanceHeight) {
-                isBlocked = true;
-            }
+            if (clearanceMargin < worstClearance) worstClearance = clearanceMargin;
+            if (expectedLineElevation <= requiredClearanceHeight) isBlocked = true;
         }
-        
-        console.log(`Link: ${totalDistKm.toFixed(2)}km | Samples: ${SAMPLES} | Clearance Margin: ${worstClearance.toFixed(2)}m | Blocked: ${isBlocked}`);
         return !isBlocked; 
     }
 
@@ -309,7 +362,6 @@
                     let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
                     let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
                     let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
-                    
                     globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI });
                     globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ });
                 }
@@ -333,11 +385,9 @@
         document.getElementById('btnPrim').disabled = false;
     }
 
-    // --- STAGE 2: Multi-Root MSF ---
+    // --- STAGE 2: Multi-Root MSF (With Disconnected Islands) ---
     function runPrimsAlgorithm() {
         const pops = getPopIndices();
-        if(pops.length === 0) return alert("Define at least one POP Index.");
-
         const threshold = parseFloat(document.getElementById('angleThreshold').value);
         const NODAL_PENALTY = parseFloat(document.getElementById('penaltyMultiplier').value);
         const CROSS_PENALTY = parseFloat(document.getElementById('crossPenaltyMultiplier').value);
@@ -345,7 +395,12 @@
 
         let inTree = new Set(pops);
         let treeOfNode = Array(nodes.length).fill(-1);
-        pops.forEach(p => treeOfNode[p] = p);
+        nodeOrphanStatus = Array(nodes.length).fill(false); // Reset global array
+        
+        pops.forEach(p => {
+            treeOfNode[p] = p;
+            nodeOrphanStatus[p] = false;
+        });
 
         finalTreeEdges = []; 
         let nodeBearings = Array(nodes.length).fill().map(() => []); 
@@ -396,19 +451,35 @@
                 }
             }
 
-            if(!bestEdge) return alert("Error: Network is disconnected (LoS blocked).");
+            if(bestEdge) {
+                inTree.add(bestEdge.v);
+                finalTreeEdges.push(bestEdge);
+                totalDistance += bestEdge.dist;
+                
+                treeOfNode[bestEdge.v] = treeOfNode[bestEdge.u];
+                nodeOrphanStatus[bestEdge.v] = nodeOrphanStatus[bestEdge.u];
 
-            inTree.add(bestEdge.v);
-            finalTreeEdges.push(bestEdge);
-            totalDistance += bestEdge.dist;
-            
-            treeOfNode[bestEdge.v] = treeOfNode[bestEdge.u];
+                if(edgeNodalViolates) angleViolations++;
+                if(edgeCrossViolates) crossViolations++;
 
-            if(edgeNodalViolates) angleViolations++;
-            if(edgeCrossViolates) crossViolations++;
-
-            nodeBearings[bestEdge.u].push(bestEdge.bUV);
-            nodeBearings[bestEdge.v].push(bestEdge.bVU);
+                nodeBearings[bestEdge.u].push(bestEdge.bUV);
+                nodeBearings[bestEdge.v].push(bestEdge.bVU);
+            } else {
+                let newRoot = -1;
+                for(let i=0; i<nodes.length; i++) {
+                    if(!inTree.has(i)) {
+                        newRoot = i;
+                        break;
+                    }
+                }
+                if(newRoot !== -1) {
+                    inTree.add(newRoot);
+                    treeOfNode[newRoot] = newRoot;
+                    nodeOrphanStatus[newRoot] = true;
+                } else {
+                    break;
+                }
+            }
         }
 
         treePolylines.forEach(p => map.removeLayer(p));
@@ -427,9 +498,20 @@
             const popColorIndex = pops.indexOf(treeOfNode[edge.u]);
             const baseColor = popColorIndex !== -1 ? treeColors[popColorIndex % treeColors.length] : '#333';
             
-            const color = violates ? '#000' : baseColor; 
-            const weight = violates ? 6 : 4;
-            const dashArray = violates ? '10, 5' : null; 
+            let color = baseColor;
+            let weight = 4;
+            let dashArray = null;
+
+            if (nodeOrphanStatus[edge.u]) {
+                color = '#ff0000'; 
+                dashArray = '5, 5'; 
+            }
+
+            if (violates) {
+                color = '#000'; 
+                weight = 6;
+                dashArray = '10, 5';
+            }
 
             const line = L.polyline([
                 [nodes[edge.u].lat, nodes[edge.u].lng], 
@@ -444,11 +526,17 @@
         document.getElementById('resViolations').innerText = angleViolations;
         document.getElementById('resCrossViolations').innerText = crossViolations;
         document.getElementById('results').style.display = 'block';
-        statusEl.innerText = `Stage 2 Complete. Generated ${pops.length} domains.`;
+        
+        let orphanCount = nodeOrphanStatus.filter(v => v).length;
+        statusEl.innerText = `Stage 2 Complete. Stranded nodes: ${orphanCount}`;
         document.getElementById('btnCap').disabled = false;
+        
+        // Clear capacity data if Stage 2 is rerun
+        finalTreeEdges.forEach(edge => edge.requiredCapacity = 0);
+        document.getElementById('btnExport').disabled = false; 
     }
 
-    // --- STAGE 3: Multi-Root Capacity Planning ---
+    // --- STAGE 3: Multi-Root Capacity Planning (Includes Islands) ---
     function runCapacityPlanning() {
         const pops = getPopIndices();
         const peakCap = parseFloat(document.getElementById('sitePeak').value);
@@ -476,8 +564,14 @@
         }
 
         pops.forEach(popIdx => {
-            dfs(popIdx, -1);
+            if (popIdx < nodes.length) dfs(popIdx, -1);
         });
+
+        for(let i = 0; i < nodes.length; i++) {
+            if(parentOf[i] === -1 && adj[i].length > 0) {
+                dfs(i, -1);
+            }
+        }
 
         finalTreeEdges.forEach(edge => {
             let childNode = (parentOf[edge.u] === edge.v) ? edge.u : edge.v;
@@ -489,6 +583,9 @@
             } else if (mode === 'conservative') {
                 requiredCapacity = peakCap + ((N - 1) * avgCap);
             }
+
+            // Save calculated capacity for the CSV Export
+            edge.requiredCapacity = requiredCapacity;
 
             edge.polyline.unbindTooltip();
             edge.polyline.bindTooltip(`${requiredCapacity} Mbps`, {

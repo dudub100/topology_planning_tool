@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Radio Network Planner: Multi-Root MSF & Capacity</title>
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+    
+    <style>
+        body, html { margin: 0; padding: 0; font-family: Arial, sans-serif; height: 100vh; width: 100vw; display: flex; overflow: hidden; }
+        #sidebar { width: 350px; height: 100vh; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; flex-shrink: 0; }
+        #map { width: calc(100vw - 350px); height: 100vh; flex-grow: 1; z-index: 1; }
+        h2 { font-size: 16px; margin-top: 0; margin-bottom: 10px; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
+        .form-group { margin-bottom: 12px; }
+        label { display: block; font-weight: bold; margin-bottom: 4px; font-size: 13px; }
+        input[type="number"], input[type="text"], textarea, select { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+        textarea { height: 80px; font-family: monospace; resize: vertical; }
+        button { width: 100%; padding: 8px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 8px; font-weight: bold; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #218838; }
+        .btn-warning { background: #ffc107; color: #333; }
+        .btn-warning:hover { background: #e0a800; }
+        .note { font-size: 11px; color: #666; margin-top: 2px; }
+        #results { margin-top: 15px; padding: 10px; background: #e9ecef; border-radius: 4px; display: none; font-size: 14px; }
+        #status { font-weight: bold; color: #d9534f; margin-top: 5px; font-size: 13px; padding-bottom: 10px;}
+        
+        .capacity-label {
+            background-color: rgba(255, 255, 255, 0.9);
+            border: 1px solid #333;
+            border-radius: 4px;
+            font-weight: bold;
+            color: #000;
+            font-size: 11px;
+            padding: 2px 5px;
+            white-space: nowrap;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+        }
+        .leaflet-tooltip-center::before { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>1. RF & Interference</h2>
+    <div class="form-group">
+        <label>Node Height (Meters)</label>
+        <input type="number" id="nodeHeight" value="30" min="0">
+    </div>
+    <div class="form-group">
+        <label>Angle Threshold (Degrees)</label>
+        <input type="number" id="angleThreshold" value="90" min="0" max="180">
+    </div>
+    <div class="form-group">
+        <label>Nodal Penalty (Same Site)</label>
+        <input type="number" id="penaltyMultiplier" value="10" min="1" step="1">
+    </div>
+    <div class="form-group">
+        <label>Crossing Penalty (Spatial)</label>
+        <input type="number" id="crossPenaltyMultiplier" value="50" min="1" step="1">
+    </div>
+
+    <h2>2. Capacity Parameters</h2>
+    <div class="form-group">
+        <label>Site Peak Capacity (Mbps)</label>
+        <input type="number" id="sitePeak" value="500" min="1">
+    </div>
+    <div class="form-group">
+        <label>Site Average Capacity (Mbps)</label>
+        <input type="number" id="siteAvg" value="100" min="1">
+    </div>
+    <div class="form-group">
+        <label>Aggregation Mode</label>
+        <select id="capacityMode">
+            <option value="regular">Regular: MAX(Sum of Avg, Peak)</option>
+            <option value="conservative">Conservative: Peak + (N-1)*Avg</option>
+        </select>
+    </div>
+
+    <h2>3. Topology Config</h2>
+    <div class="form-group">
+        <label>POP Indices (Comma Separated)</label>
+        <input type="text" id="popIndices" value="0">
+        <div class="note">Example: 0, 4, 12</div>
+    </div>
+    <div class="form-group">
+        <textarea id="nodeList" placeholder="Click map to add nodes..."></textarea>
+    </div>
+    <button onclick="syncMapFromList()">Update Map from List</button>
+    <hr>
+    
+    <div id="status">Ready. Add nodes to begin.</div>
+
+    <button id="btnLos" onclick="runLoSCheck()">Stage 1: Check Line of Sight</button>
+    <button id="btnPrim" class="btn-success" onclick="runPrimsAlgorithm()" disabled>Stage 2: Run Multi-Root MSF</button>
+    <button id="btnCap" class="btn-warning" onclick="runCapacityPlanning()" disabled>Stage 3: Calculate Capacity</button>
+    
+    <div id="results">
+        <p style="margin: 0 0 5px 0;"><strong>Total Network Distance:</strong> <span id="resDistance">0</span> km</p>
+        <p style="margin: 0 0 5px 0;"><strong>Nodal Violations:</strong> <span id="resViolations">0</span></p>
+        <p style="margin: 0;"><strong>Crossing Violations:</strong> <span id="resCrossViolations">0</span></p>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<script>
+    const map = L.map('map').setView([32.0853, 34.7818], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+    // Color palette for distinct POP routing domains
+    const treeColors = ['#e6194B', '#4363d8', '#f58231', '#911eb4', '#3cb44b', '#42d4f4', '#f032e6', '#bfef45', '#fabed4'];
+
+    let nodes = [];
+    let markers = [];
+    let losPolylines = [];
+    let treePolylines = [];
+    let globalEdges = [];
+    let finalTreeEdges = []; 
+
+    map.on('click', function(e) {
+        nodes.push({ lat: e.latlng.lat, lng: e.latlng.lng });
+        updateUI();
+    });
+
+    function getPopIndices() {
+        const raw = document.getElementById('popIndices').value;
+        if (!raw) return [0];
+        return raw.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n) && n >= 0 && n < nodes.length);
+    }
+
+    function updateUI() {
+        const textarea = document.getElementById('nodeList');
+        textarea.value = nodes.map(n => `${n.lat.toFixed(5)}, ${n.lng.toFixed(5)}`).join('\n');
+        
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+        
+        const pops = getPopIndices();
+        
+        nodes.forEach((node, i) => {
+            const isPop = pops.includes(i);
+            const popColor = isPop ? treeColors[pops.indexOf(i) % treeColors.length] : '#007bff';
+            
+            const marker = L.circleMarker([node.lat, node.lng], {
+                color: isPop ? '#000' : popColor, 
+                weight: isPop ? 2 : 1,
+                fillColor: popColor, 
+                fillOpacity: 0.9, 
+                radius: isPop ? 8 : 5
+            }).addTo(map).bindPopup(`Node ${i} ${isPop ? '(POP)' : ''}`);
+            markers.push(marker);
+        });
+
+        document.getElementById('btnPrim').disabled = true;
+        document.getElementById('btnCap').disabled = true;
+        globalEdges = [];
+        finalTreeEdges = [];
+        losPolylines.forEach(p => map.removeLayer(p));
+        treePolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
+        treePolylines = [];
+        document.getElementById('results').style.display = 'none';
+        document.getElementById('status').innerText = "Topology changed. Run Stage 1.";
+    }
+
+    // Attach event listener to update colors if POP input changes manually
+    document.getElementById('popIndices').addEventListener('change', updateUI);
+
+    function syncMapFromList() {
+        const text = document.getElementById('nodeList').value;
+        const lines = text.split('\n');
+        nodes = [];
+        lines.forEach(line => {
+            const parts = line.split(',');
+            if(parts.length === 2) {
+                const lat = parseFloat(parts[0].trim());
+                const lng = parseFloat(parts[1].trim());
+                if(!isNaN(lat) && !isNaN(lng)) nodes.push({lat, lng});
+            }
+        });
+        updateUI();
+        if(nodes.length > 0) map.setView([nodes[0].lat, nodes[0].lng], 13);
+    }
+
+    // --- Math & GIS ---
+    function getDistance(lat1, lon1, lat2, lon2) {
+        const R = 6371; 
+        const p = Math.PI / 180;
+        const a = 0.5 - Math.cos((lat2 - lat1) * p)/2 + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lon2 - lon1) * p))/2;
+        return 2 * R * Math.asin(Math.sqrt(a));
+    }
+    function getBearing(lat1, lon1, lat2, lon2) {
+        const p = Math.PI / 180;
+        const y = Math.sin((lon2 - lon1) * p) * Math.cos(lat2 * p);
+        const x = Math.cos(lat1 * p) * Math.sin(lat2 * p) - Math.sin(lat1 * p) * Math.cos(lat2 * p) * Math.cos((lon2 - lon1) * p);
+        let brng = Math.atan2(y, x) * (180 / Math.PI);
+        return (brng + 360) % 360;
+    }
+    function getAngleDifference(b1, b2) {
+        let diff = Math.abs(b1 - b2);
+        return diff > 180 ? 360 - diff : diff;
+    }
+
+    function ccw(A, B, C) { return (C.lng - A.lng) * (B.lat - A.lat) > (B.lng - A.lng) * (C.lat - A.lat); }
+    function doIntersect(A, B, C, D) {
+        if ((A.lat === C.lat && A.lng === C.lng) || (A.lat === D.lat && A.lng === D.lng) ||
+            (B.lat === C.lat && B.lng === C.lng) || (B.lat === D.lat && B.lng === D.lng)) {
+            return false;
+        }
+        return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
+    }
+
+    async function checkLineOfSight(nodeA, nodeB, height) {
+        const locations = `${nodeA.lat},${nodeA.lng}|${nodeB.lat},${nodeB.lng}`;
+        const url = `https://api.opentopodata.org/v1/srtm90m?locations=${locations}&samples=10`;
+        try {
+            const response = await fetch(url);
+            if(response.status === 429) throw new Error("Rate limit");
+            const data = await response.json();
+            if(!data.results || data.results.length < 10) return true;
+
+            const hA = data.results[0].elevation + height;
+            const hB = data.results[9].elevation + height;
+            for(let i = 1; i < 9; i++) {
+                const expectedLineElevation = hA + ((hB - hA) * (i / 9));
+                if(data.results[i].elevation > expectedLineElevation) return false; 
+            }
+            return true;
+        } catch (e) {
+            console.warn("LoS check failed. Assuming Clear LoS.");
+            return true; 
+        }
+    }
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // --- STAGE 1: Line of Sight ---
+    async function runLoSCheck() {
+        if(nodes.length < 2) return alert("Add at least 2 nodes.");
+        const height = parseFloat(document.getElementById('nodeHeight').value);
+        const statusEl = document.getElementById('status');
+        
+        document.getElementById('btnLos').disabled = true;
+        document.getElementById('btnPrim').disabled = true;
+        document.getElementById('btnCap').disabled = true;
+        globalEdges = [];
+        
+        let totalChecks = (nodes.length * (nodes.length - 1)) / 2;
+        let checked = 0;
+
+        for(let i = 0; i < nodes.length; i++) {
+            for(let j = i + 1; j < nodes.length; j++) {
+                await sleep(1100); 
+                let hasLoS = await checkLineOfSight(nodes[i], nodes[j], height);
+                checked++;
+                statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
+                
+                if(hasLoS) {
+                    let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
+                    
+                    globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI });
+                    globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ });
+                }
+            }
+        }
+
+        losPolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
+        globalEdges.forEach(edge => {
+            if (edge.u < edge.v) { 
+                const losLine = L.polyline([
+                    [nodes[edge.u].lat, nodes[edge.u].lng], 
+                    [nodes[edge.v].lat, nodes[edge.v].lng]
+                ], {color: '#888', weight: 1.5, dashArray: '5, 5', opacity: 0.6}).addTo(map);
+                losPolylines.push(losLine);
+            }
+        });
+
+        statusEl.innerText = "Stage 1 Complete. Ready for Stage 2.";
+        document.getElementById('btnLos').disabled = false;
+        document.getElementById('btnPrim').disabled = false;
+    }
+
+    // --- STAGE 2: Multi-Root Minimum Spanning Forest ---
+    function runPrimsAlgorithm() {
+        const pops = getPopIndices();
+        if(pops.length === 0) return alert("Define at least one POP Index.");
+
+        const threshold = parseFloat(document.getElementById('angleThreshold').value);
+        const NODAL_PENALTY = parseFloat(document.getElementById('penaltyMultiplier').value);
+        const CROSS_PENALTY = parseFloat(document.getElementById('crossPenaltyMultiplier').value);
+        const statusEl = document.getElementById('status');
+
+        // Initialize tree with ALL POPs simultaneously
+        let inTree = new Set(pops);
+        let treeOfNode = Array(nodes.length).fill(-1);
+        pops.forEach(p => treeOfNode[p] = p);
+
+        finalTreeEdges = []; 
+        let nodeBearings = Array(nodes.length).fill().map(() => []); 
+        let angleViolations = 0;
+        let crossViolations = 0;
+        let totalDistance = 0;
+
+        while(inTree.size < nodes.length) {
+            let bestEdge = null;
+            let minCost = Infinity;
+            let edgeNodalViolates = false;
+            let edgeCrossViolates = false;
+
+            for(let edge of globalEdges) {
+                // Must connect an in-tree node to an out-of-tree node
+                if(inTree.has(edge.u) && !inTree.has(edge.v)) {
+                    let cost = edge.dist;
+                    let nodalViolates = false;
+                    let crossViolates = false;
+
+                    let localMinAngle = 180;
+                    for(let existingBearing of nodeBearings[edge.u]) {
+                        let ang = getAngleDifference(edge.bUV, existingBearing);
+                        if(ang < localMinAngle) localMinAngle = ang;
+                    }
+                    if(localMinAngle < threshold) {
+                        nodalViolates = true;
+                        cost *= NODAL_PENALTY;
+                    }
+
+                    for(let tEdge of finalTreeEdges) {
+                        if (doIntersect(nodes[edge.u], nodes[edge.v], nodes[tEdge.u], nodes[tEdge.v])) {
+                            let ang1 = getAngleDifference(edge.bUV, tEdge.bUV);
+                            let ang2 = getAngleDifference(edge.bUV, tEdge.bVU);
+                            if (Math.min(ang1, ang2) < threshold) {
+                                crossViolates = true;
+                                break; 
+                            }
+                        }
+                    }
+                    if(crossViolates) cost *= CROSS_PENALTY;
+
+                    if(cost < minCost) {
+                        minCost = cost;
+                        bestEdge = edge;
+                        edgeNodalViolates = nodalViolates;
+                        edgeCrossViolates = crossViolates;
+                    }
+                }
+            }
+
+            if(!bestEdge) return alert("Error: Network is disconnected (LoS blocked).");
+
+            inTree.add(bestEdge.v);
+            finalTreeEdges.push(bestEdge);
+            totalDistance += bestEdge.dist;
+            
+            // Assign the new node to the same routing domain (tree) as its parent
+            treeOfNode[bestEdge.v] = treeOfNode[bestEdge.u];
+
+            if(edgeNodalViolates) angleViolations++;
+            if(edgeCrossViolates) crossViolations++;
+
+            nodeBearings[bestEdge.u].push(bestEdge.bUV);
+            nodeBearings[bestEdge.v].push(bestEdge.bVU);
+        }
+
+        treePolylines.forEach(p => map.removeLayer(p));
+        treePolylines = [];
+
+        finalTreeEdges.forEach(edge => {
+            let violates = false;
+            let othersU = nodeBearings[edge.u].filter(b => b !== edge.bUV);
+            for(let b of othersU) { if(getAngleDifference(b, edge.bUV) < threshold) violates = true; }
+            for(let tEdge of finalTreeEdges) {
+                if (edge !== tEdge && doIntersect(nodes[edge.u], nodes[edge.v], nodes[tEdge.u], nodes[tEdge.v])) {
+                    if (Math.min(getAngleDifference(edge.bUV, tEdge.bUV), getAngleDifference(edge.bUV, tEdge.bVU)) < threshold) violates = true;
+                }
+            }
+
+            // Determine line color based on its parent POP
+            const popColorIndex = pops.indexOf(treeOfNode[edge.u]);
+            const baseColor = popColorIndex !== -1 ? treeColors[popColorIndex % treeColors.length] : '#333';
+            
+            const color = violates ? '#000' : baseColor; 
+            const weight = violates ? 6 : 4;
+            const dashArray = violates ? '10, 5' : null; // Differentiate violations with dashes if color matching fails
+
+            const line = L.polyline([
+                [nodes[edge.u].lat, nodes[edge.u].lng], 
+                [nodes[edge.v].lat, nodes[edge.v].lng]
+            ], {color: color, weight: weight, dashArray: dashArray, opacity: 1}).addTo(map);
+            
+            edge.polyline = line; 
+            treePolylines.push(line);
+        });
+
+        document.getElementById('resDistance').innerText = totalDistance.toFixed(2);
+        document.getElementById('resViolations').innerText = angleViolations;
+        document.getElementById('resCrossViolations').innerText = crossViolations;
+        document.getElementById('results').style.display = 'block';
+        statusEl.innerText = `Stage 2 Complete. Generated ${pops.length} domains.`;
+        document.getElementById('btnCap').disabled = false;
+    }
+
+    // --- STAGE 3: Multi-Root Capacity Planning ---
+    function runCapacityPlanning() {
+        const pops = getPopIndices();
+        const peakCap = parseFloat(document.getElementById('sitePeak').value);
+        const avgCap = parseFloat(document.getElementById('siteAvg').value);
+        const mode = document.getElementById('capacityMode').value;
+        const statusEl = document.getElementById('status');
+
+        let adj = Array(nodes.length).fill().map(() => []);
+        finalTreeEdges.forEach(edge => {
+            adj[edge.u].push(edge.v);
+            adj[edge.v].push(edge.u);
+        });
+
+        let subtreeSize = Array(nodes.length).fill(0);
+        let parentOf = Array(nodes.length).fill(-1);
+
+        function dfs(curr, parent) {
+            parentOf[curr] = parent;
+            let size = 1; 
+            for(let nxt of adj[curr]) {
+                if(nxt !== parent) size += dfs(nxt, curr);
+            }
+            subtreeSize[curr] = size;
+            return size;
+        }
+
+        // Run the capacity traversal for EVERY POP independently
+        pops.forEach(popIdx => {
+            dfs(popIdx, -1);
+        });
+
+        finalTreeEdges.forEach(edge => {
+            let childNode = (parentOf[edge.u] === edge.v) ? edge.u : edge.v;
+            let N = subtreeSize[childNode];
+            let requiredCapacity = 0;
+
+            if (mode === 'regular') {
+                requiredCapacity = Math.max(N * avgCap, peakCap);
+            } else if (mode === 'conservative') {
+                requiredCapacity = peakCap + ((N - 1) * avgCap);
+            }
+
+            edge.polyline.unbindTooltip();
+            edge.polyline.bindTooltip(`${requiredCapacity} Mbps`, {
+                permanent: true, direction: 'center', className: 'capacity-label'
+            }).openTooltip();
+        });
+
+        statusEl.innerText = "Stage 3 Complete. Capacities generated.";
+    }
+</script>
+
+</body>
+</html>

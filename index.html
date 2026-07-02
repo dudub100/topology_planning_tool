@@ -226,38 +226,46 @@ function getInterpolatedPoints(nodeA, nodeB, samples) {
 }
 
 // --- Updated Line of Sight with Explicit Arrays & Fresnel Clearance ---
-async function checkLineOfSight(nodeA, nodeB, height) {
+    async function checkLineOfSight(nodeA, nodeB, height) {
     const SAMPLES = 50; 
     const totalDistKm = getDistance(nodeA.lat, nodeA.lng, nodeB.lat, nodeB.lng);
     
-    // Generate all 50 coordinates locally so the API can't ignore them
-    const points = getInterpolatedPoints(nodeA, nodeB, SAMPLES);
-    const locString = points.map(p => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`).join('|');
+    // Generate exactly 50 coordinates along the path
+    let lats = [];
+    let lngs = [];
+    for (let i = 0; i < SAMPLES; i++) {
+        let fraction = i / (SAMPLES - 1);
+        lats.push((nodeA.lat + (nodeB.lat - nodeA.lat) * fraction).toFixed(5));
+        lngs.push((nodeA.lng + (nodeB.lng - nodeA.lng) * fraction).toFixed(5));
+    }
     
-    // Force OpenTopoData to check every single coordinate
-    const otUrl = `https://api.opentopodata.org/v1/srtm90m?locations=${locString}`;
+    // Switch to Open-Meteo API (Reliable, supports CORS, accepts arrays)
+    const url = `https://api.open-meteo.com/v1/elevation?latitude=${lats.join(',')}&longitude=${lngs.join(',')}`;
     
     let elevations = [];
     try {
-        const otRes = await fetch(otUrl);
-        if (otRes.status === 200) {
-            const otData = await otRes.json();
-            if (otData.results && otData.results.length === SAMPLES) {
-                elevations = otData.results.map(r => r.elevation);
+        const response = await fetch(url);
+        if (response.status === 200) {
+            const data = await response.json();
+            if (data.elevation && data.elevation.length === SAMPLES) {
+                elevations = data.elevation;
             }
         }
     } catch (e) {
         console.warn("Elevation API failed or timed out.");
     }
 
-    // Fail closed if the API didn't return our exact 50 points
+    // Fail closed if the API drops the request
     if (elevations.length < SAMPLES) return false;
+
+    // Fail closed if any 'null' or missing data sneaks in (prevents flat-earth math)
+    if (elevations.some(e => e === null || isNaN(e))) return false;
 
     // --- Process Terrain, Earth Bulge, and Fresnel Zone ---
     const hA = elevations[0] + height;
     const hB = elevations[SAMPLES - 1] + height;
     const K_FACTOR = 1.333; // 4/3 Earth radius refraction
-    const FREQ_GHZ = 18;    // Default microwave frequency for Fresnel
+    const FREQ_GHZ = 18;    // Default microwave frequency for Fresnel clearance
     
     for (let i = 1; i < SAMPLES - 1; i++) {
         // 1. Where the center of the beam SHOULD be (linear interpolation)
@@ -275,8 +283,9 @@ async function checkLineOfSight(nodeA, nodeB, height) {
         // 4. Effective ground height blocking the beam
         const actualGround = elevations[i] + earthBulge + fresnelClearance;
         
+        // Check for physical obstruction
         if (actualGround >= expectedLineElevation) {
-            return false; // Obstruction hit!
+            return false; 
         }
     }
     

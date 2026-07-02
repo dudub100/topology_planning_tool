@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Radio Network Planner: Topology & Capacity</title>
+    <title>Radio Network Planner: Topology, Spatial Interference & Capacity</title>
     
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
@@ -26,7 +26,6 @@
         #results { margin-top: 15px; padding: 10px; background: #e9ecef; border-radius: 4px; display: none; font-size: 14px; }
         #status { font-weight: bold; color: #d9534f; margin-top: 5px; font-size: 13px; padding-bottom: 10px;}
         
-        /* Custom CSS for the capacity labels on the map */
         .capacity-label {
             background-color: rgba(255, 255, 255, 0.9);
             border: 1px solid #333;
@@ -38,14 +37,13 @@
             white-space: nowrap;
             box-shadow: 0 1px 3px rgba(0,0,0,0.3);
         }
-        /* Hide the default tooltip pointer arrow */
         .leaflet-tooltip-center::before { display: none; }
     </style>
 </head>
 <body>
 
 <div id="sidebar">
-    <h2>1. RF Parameters</h2>
+    <h2>1. RF & Interference Parameters</h2>
     <div class="form-group">
         <label>Node Height (Meters)</label>
         <input type="number" id="nodeHeight" value="30" min="0">
@@ -55,8 +53,13 @@
         <input type="number" id="angleThreshold" value="90" min="0" max="180">
     </div>
     <div class="form-group">
-        <label>Angle Penalty Multiplier</label>
+        <label>Nodal Penalty (Same Site)</label>
         <input type="number" id="penaltyMultiplier" value="10" min="1" step="1">
+    </div>
+    <div class="form-group">
+        <label>Crossing Penalty (Spatial)</label>
+        <input type="number" id="crossPenaltyMultiplier" value="50" min="1" step="1">
+        <div class="note">Penalty if links cross in space at shallow angles.</div>
     </div>
 
     <h2>2. Capacity Parameters</h2>
@@ -95,7 +98,8 @@
     
     <div id="results">
         <p style="margin: 0 0 5px 0;"><strong>Total Network Distance:</strong> <span id="resDistance">0</span> km</p>
-        <p style="margin: 0;"><strong>Angle Violations (< Threshold):</strong> <span id="resViolations">0</span></p>
+        <p style="margin: 0 0 5px 0;"><strong>Nodal Violations:</strong> <span id="resViolations">0</span></p>
+        <p style="margin: 0;"><strong>Spatial Crossing Violations:</strong> <span id="resCrossViolations">0</span></p>
     </div>
 </div>
 
@@ -110,7 +114,7 @@
     let losPolylines = [];
     let treePolylines = [];
     let globalEdges = [];
-    let finalTreeEdges = []; // Store the final tree for capacity planning
+    let finalTreeEdges = []; 
 
     map.on('click', function(e) {
         nodes.push({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -135,7 +139,6 @@
             markers.push(marker);
         });
 
-        // Reset system state when nodes change
         document.getElementById('btnPrim').disabled = true;
         document.getElementById('btnCap').disabled = true;
         globalEdges = [];
@@ -183,6 +186,19 @@
         return diff > 180 ? 360 - diff : diff;
     }
 
+    // --- Intersection Math (CCW Algorithm) ---
+    function ccw(A, B, C) {
+        return (C.lng - A.lng) * (B.lat - A.lat) > (B.lng - A.lng) * (C.lat - A.lat);
+    }
+    function doIntersect(A, B, C, D) {
+        // If they share a node, they don't cross in space, they connect. Handled by Nodal check.
+        if ((A.lat === C.lat && A.lng === C.lng) || (A.lat === D.lat && A.lng === D.lng) ||
+            (B.lat === C.lat && B.lng === C.lng) || (B.lat === D.lat && B.lng === D.lng)) {
+            return false;
+        }
+        return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
+    }
+
     async function checkLineOfSight(nodeA, nodeB, height) {
         const locations = `${nodeA.lat},${nodeA.lng}|${nodeB.lat},${nodeB.lng}`;
         const url = `https://api.opentopodata.org/v1/srtm90m?locations=${locations}&samples=10`;
@@ -211,20 +227,16 @@
     // --- STAGE 1: Line of Sight ---
     async function runLoSCheck() {
         if(nodes.length < 2) return alert("Add at least 2 nodes.");
-        
         const height = parseFloat(document.getElementById('nodeHeight').value);
         const statusEl = document.getElementById('status');
-        const btnLos = document.getElementById('btnLos');
-
-        btnLos.disabled = true;
+        
+        document.getElementById('btnLos').disabled = true;
         document.getElementById('btnPrim').disabled = true;
         document.getElementById('btnCap').disabled = true;
         globalEdges = [];
         
         let totalChecks = (nodes.length * (nodes.length - 1)) / 2;
         let checked = 0;
-
-        statusEl.innerText = `Fetching Elevation Profiles (0/${totalChecks})...`;
 
         for(let i = 0; i < nodes.length; i++) {
             for(let j = i + 1; j < nodes.length; j++) {
@@ -257,46 +269,73 @@
         });
 
         statusEl.innerText = "Stage 1 Complete. Ready for Stage 2.";
-        btnLos.disabled = false;
+        document.getElementById('btnLos').disabled = false;
         document.getElementById('btnPrim').disabled = false;
     }
 
-    // --- STAGE 2: Prim's Topology ---
+    // --- STAGE 2: Prim's Topology with Spatial Interference ---
     function runPrimsAlgorithm() {
         const popIdx = parseInt(document.getElementById('popIndex').value);
         if(isNaN(popIdx) || popIdx < 0 || popIdx >= nodes.length) return alert("Invalid POP Index.");
 
         const threshold = parseFloat(document.getElementById('angleThreshold').value);
-        const PENALTY_MULTIPLIER = parseFloat(document.getElementById('penaltyMultiplier').value);
+        const NODAL_PENALTY = parseFloat(document.getElementById('penaltyMultiplier').value);
+        const CROSS_PENALTY = parseFloat(document.getElementById('crossPenaltyMultiplier').value);
         const statusEl = document.getElementById('status');
 
         let inTree = new Set([popIdx]);
-        finalTreeEdges = []; // Reset the saved tree
+        finalTreeEdges = []; 
         let nodeBearings = Array(nodes.length).fill().map(() => []); 
         let angleViolations = 0;
+        let crossViolations = 0;
         let totalDistance = 0;
 
         while(inTree.size < nodes.length) {
             let bestEdge = null;
             let minCost = Infinity;
-            let edgeAngleViolates = false;
+            let edgeNodalViolates = false;
+            let edgeCrossViolates = false;
 
             for(let edge of globalEdges) {
                 if(inTree.has(edge.u) && !inTree.has(edge.v)) {
+                    let cost = edge.dist;
+                    let nodalViolates = false;
+                    let crossViolates = false;
+
+                    // 1. Nodal Check (Same Site)
                     let localMinAngle = 180;
                     for(let existingBearing of nodeBearings[edge.u]) {
                         let ang = getAngleDifference(edge.bUV, existingBearing);
                         if(ang < localMinAngle) localMinAngle = ang;
                     }
+                    if(localMinAngle < threshold) {
+                        nodalViolates = true;
+                        cost *= NODAL_PENALTY;
+                    }
 
-                    let cost = edge.dist;
-                    let violates = localMinAngle < threshold;
-                    if(violates) cost *= PENALTY_MULTIPLIER;
+                    // 2. Spatial Crossing Check
+                    for(let tEdge of finalTreeEdges) {
+                        if (doIntersect(nodes[edge.u], nodes[edge.v], nodes[tEdge.u], nodes[tEdge.v])) {
+                            // Links cross. Check the angle of the X they make.
+                            let ang1 = getAngleDifference(edge.bUV, tEdge.bUV);
+                            let ang2 = getAngleDifference(edge.bUV, tEdge.bVU);
+                            let intersectionAngle = Math.min(ang1, ang2);
+                            
+                            if (intersectionAngle < threshold) {
+                                crossViolates = true;
+                                break; // Found a bad crossing, apply penalty
+                            }
+                        }
+                    }
+                    if(crossViolates) {
+                        cost *= CROSS_PENALTY;
+                    }
 
                     if(cost < minCost) {
                         minCost = cost;
                         bestEdge = edge;
-                        edgeAngleViolates = violates;
+                        edgeNodalViolates = nodalViolates;
+                        edgeCrossViolates = crossViolates;
                     }
                 }
             }
@@ -306,7 +345,8 @@
             inTree.add(bestEdge.v);
             finalTreeEdges.push(bestEdge);
             totalDistance += bestEdge.dist;
-            if(edgeAngleViolates) angleViolations++;
+            if(edgeNodalViolates) angleViolations++;
+            if(edgeCrossViolates) crossViolations++;
 
             nodeBearings[bestEdge.u].push(bestEdge.bUV);
             nodeBearings[bestEdge.v].push(bestEdge.bVU);
@@ -317,28 +357,33 @@
         treePolylines = [];
 
         finalTreeEdges.forEach(edge => {
+            // Re-evaluate violations just for coloring the final output line
             let violates = false;
             let othersU = nodeBearings[edge.u].filter(b => b !== edge.bUV);
             for(let b of othersU) { if(getAngleDifference(b, edge.bUV) < threshold) violates = true; }
+            
+            for(let tEdge of finalTreeEdges) {
+                if (edge !== tEdge && doIntersect(nodes[edge.u], nodes[edge.v], nodes[tEdge.u], nodes[tEdge.v])) {
+                    let intersectionAngle = Math.min(getAngleDifference(edge.bUV, tEdge.bUV), getAngleDifference(edge.bUV, tEdge.bVU));
+                    if (intersectionAngle < threshold) violates = true;
+                }
+            }
 
             const color = violates ? 'red' : 'green';
-            
             const line = L.polyline([
                 [nodes[edge.u].lat, nodes[edge.u].lng], 
                 [nodes[edge.v].lat, nodes[edge.v].lng]
             ], {color: color, weight: 5, opacity: 1}).addTo(map);
             
-            // Store the polyline object inside the edge for Stage 3 annotations
             edge.polyline = line; 
             treePolylines.push(line);
         });
 
         document.getElementById('resDistance').innerText = totalDistance.toFixed(2);
         document.getElementById('resViolations').innerText = angleViolations;
+        document.getElementById('resCrossViolations').innerText = crossViolations;
         document.getElementById('results').style.display = 'block';
         statusEl.innerText = `Stage 2 Complete. Ready for Stage 3.`;
-        
-        // Enable capacity planning
         document.getElementById('btnCap').disabled = false;
     }
 
@@ -350,9 +395,6 @@
         const mode = document.getElementById('capacityMode').value;
         const statusEl = document.getElementById('status');
 
-        if(!finalTreeEdges || finalTreeEdges.length === 0) return alert("Run Stage 2 First.");
-
-        // 1. Build Adjacency List for the Tree
         let adj = Array(nodes.length).fill().map(() => []);
         finalTreeEdges.forEach(edge => {
             adj[edge.u].push(edge.v);
@@ -362,28 +404,20 @@
         let subtreeSize = Array(nodes.length).fill(0);
         let parentOf = Array(nodes.length).fill(-1);
 
-        // 2. Post-Order Traversal (DFS) to find parent-child directions & count downstream nodes
         function dfs(curr, parent) {
             parentOf[curr] = parent;
-            let size = 1; // Count itself
+            let size = 1; 
             for(let nxt of adj[curr]) {
-                if(nxt !== parent) {
-                    size += dfs(nxt, curr);
-                }
+                if(nxt !== parent) size += dfs(nxt, curr);
             }
             subtreeSize[curr] = size;
             return size;
         }
 
-        // Root the tree at the POP
         dfs(popIdx, -1);
 
-        // 3. Process each edge, calculate capacity, and annotate the map
         finalTreeEdges.forEach(edge => {
-            // Determine which node is the "child" in this specific link relationship
             let childNode = (parentOf[edge.u] === edge.v) ? edge.u : edge.v;
-            
-            // The number of downstream nodes relying on this link is the size of the child's subtree
             let N = subtreeSize[childNode];
             let requiredCapacity = 0;
 
@@ -393,14 +427,9 @@
                 requiredCapacity = peakCap + ((N - 1) * avgCap);
             }
 
-            // Remove any old tooltips
             edge.polyline.unbindTooltip();
-            
-            // Add the new capacity label centered on the line
             edge.polyline.bindTooltip(`${requiredCapacity} Mbps`, {
-                permanent: true, 
-                direction: 'center', 
-                className: 'capacity-label'
+                permanent: true, direction: 'center', className: 'capacity-label'
             }).openTooltip();
         });
 

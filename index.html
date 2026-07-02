@@ -42,6 +42,11 @@
             box-shadow: 0 1px 3px rgba(0,0,0,0.3);
         }
         .leaflet-tooltip-center::before { display: none; }
+        
+        /* Legend styling */
+        .legend { font-size: 11px; color: #555; background: #fff; padding: 5px; border-radius: 4px; border: 1px solid #ccc; margin-top: 10px; }
+        .legend-item { display: flex; align-items: center; margin-bottom: 3px; }
+        .legend-color { width: 15px; height: 3px; margin-right: 8px; }
     </style>
 </head>
 <body>
@@ -97,6 +102,11 @@
         <button class="btn-info" onclick="document.getElementById('csvFileInput').click()" style="flex: 1;">Upload CSV</button>
     </div>
     
+    <div class="legend" id="meshLegend" style="display: none;">
+        <div class="legend-item"><div class="legend-color" style="border-top: 2px dashed #28a745;"></div> Verified LoS Mesh</div>
+        <div class="legend-item"><div class="legend-color" style="border-top: 2px dashed #000;"></div> Unverified LoS Mesh (Assumed)</div>
+    </div>
+    
     <hr>
     
     <div id="status">Ready. Add nodes to begin.</div>
@@ -128,7 +138,7 @@
     let treePolylines = [];
     let globalEdges = [];
     let finalTreeEdges = []; 
-    let nodeOrphanStatus = []; // Track orphan status globally for export
+    let nodeOrphanStatus = []; 
 
     map.on('click', function(e) {
         nodes.push({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -167,6 +177,7 @@
         document.getElementById('btnPrim').disabled = true;
         document.getElementById('btnCap').disabled = true;
         document.getElementById('btnExport').disabled = true;
+        document.getElementById('meshLegend').style.display = 'none';
         globalEdges = [];
         finalTreeEdges = [];
         losPolylines.forEach(p => map.removeLayer(p));
@@ -195,7 +206,6 @@
         if(nodes.length > 0) map.setView([nodes[0].lat, nodes[0].lng], 13);
     }
 
-    // --- CSV Import Function ---
     function importCSV(event) {
         const file = event.target.files[0];
         if (!file) return;
@@ -209,33 +219,30 @@
                 if(parts.length >= 2) {
                     const lat = parseFloat(parts[0].trim());
                     const lng = parseFloat(parts[1].trim());
-                    // Ignore header strings or invalid rows
                     if(!isNaN(lat) && !isNaN(lng)) nodes.push({lat, lng});
                 }
             });
             updateUI();
             if(nodes.length > 0) map.setView([nodes[0].lat, nodes[0].lng], 13);
-            
-            // Reset the file input so the same file can be uploaded again if needed
             document.getElementById('csvFileInput').value = ""; 
         };
         reader.readAsText(file);
     }
 
-    // --- CSV Export Function ---
     function exportToCSV() {
         if(finalTreeEdges.length === 0) return alert("No network data to export.");
         
         let csvContent = "data:text/csv;charset=utf-8,";
-        csvContent += "From Node,From Lat,From Lng,To Node,To Lat,To Lng,Distance (km),Capacity (Mbps),Status\n";
+        csvContent += "From Node,From Lat,From Lng,To Node,To Lat,To Lng,Distance (km),Capacity (Mbps),Network Status,LoS Status\n";
         
         finalTreeEdges.forEach(edge => {
-            const status = nodeOrphanStatus[edge.u] ? "Stranded Island" : "Connected to POP";
+            const netStatus = nodeOrphanStatus[edge.u] ? "Stranded Island" : "Connected to POP";
+            const losStatus = edge.status === 'verified' ? "Verified" : "Unverified (Assumed)";
             const cap = edge.requiredCapacity || "0"; 
             
             const row = `${edge.u},${nodes[edge.u].lat.toFixed(5)},${nodes[edge.u].lng.toFixed(5)},` +
                         `${edge.v},${nodes[edge.v].lat.toFixed(5)},${nodes[edge.v].lng.toFixed(5)},` +
-                        `${edge.dist.toFixed(2)},${cap},${status}`;
+                        `${edge.dist.toFixed(2)},${cap},${netStatus},${losStatus}`;
             
             csvContent += row + "\n";
         });
@@ -279,7 +286,7 @@
         return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
     }
 
-    // --- STAGE 1: Strict Line of Sight ---
+    // --- STAGE 1: Three-State Line of Sight Engine ---
     async function checkLineOfSight(nodeA, nodeB, height) {
         const totalDistKm = getDistance(nodeA.lat, nodeA.lng, nodeB.lat, nodeB.lng);
         let SAMPLES = Math.floor((totalDistKm * 1000) / 90);
@@ -308,7 +315,10 @@
             console.warn("Elevation API failed.");
         }
 
-        if (elevations.length < SAMPLES || elevations.some(isNaN)) return false; 
+        // CONDITION 2: Failsafe if API drops, returns NaNs, or returns an array of pure 0s (flat-earth glitch)
+        if (elevations.length < SAMPLES || elevations.some(isNaN) || elevations.every(e => e === 0)) {
+            return 'unverified'; 
+        }
 
         const towerHeight = parseFloat(height) || 0;
         const hA = elevations[0] + towerHeight;
@@ -317,7 +327,6 @@
         const FREQ_GHZ = 18;    
         
         let isBlocked = false;
-        let worstClearance = Infinity; 
 
         for (let i = 1; i < SAMPLES - 1; i++) {
             const expectedLineElevation = hA + ((hB - hA) * (i / (SAMPLES - 1)));
@@ -329,11 +338,14 @@
             const actualGround = elevations[i] + earthBulge;
             const requiredClearanceHeight = actualGround + fresnelClearance;
             
-            const clearanceMargin = expectedLineElevation - requiredClearanceHeight;
-            if (clearanceMargin < worstClearance) worstClearance = clearanceMargin;
-            if (expectedLineElevation <= requiredClearanceHeight) isBlocked = true;
+            if (expectedLineElevation <= requiredClearanceHeight) {
+                isBlocked = true;
+                break; // Stop checking if we hit an obstruction
+            }
         }
-        return !isBlocked; 
+        
+        // CONDITION 3 (Blocked) or CONDITION 1 (Verified)
+        return isBlocked ? 'blocked' : 'verified'; 
     }
 
     const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -346,6 +358,7 @@
         document.getElementById('btnLos').disabled = true;
         document.getElementById('btnPrim').disabled = true;
         document.getElementById('btnCap').disabled = true;
+        document.getElementById('meshLegend').style.display = 'block';
         globalEdges = [];
         
         let totalChecks = (nodes.length * (nodes.length - 1)) / 2;
@@ -354,28 +367,35 @@
         for(let i = 0; i < nodes.length; i++) {
             for(let j = i + 1; j < nodes.length; j++) {
                 await sleep(500); 
-                let hasLoS = await checkLineOfSight(nodes[i], nodes[j], height);
+                let status = await checkLineOfSight(nodes[i], nodes[j], height);
                 checked++;
                 statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
                 
-                if(hasLoS) {
+                // Allow both Verified AND Unverified links to populate the global edges
+                if(status === 'verified' || status === 'unverified') {
                     let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
                     let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
                     let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
-                    globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI });
-                    globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ });
+                    globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI, status: status });
+                    globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ, status: status });
                 }
             }
         }
 
         losPolylines.forEach(p => map.removeLayer(p));
         losPolylines = [];
+        
         globalEdges.forEach(edge => {
             if (edge.u < edge.v) { 
+                // Color formatting based on verification status
+                const color = edge.status === 'verified' ? '#28a745' : '#000000';
+                const opacity = edge.status === 'verified' ? 0.6 : 0.4;
+                const weight = edge.status === 'verified' ? 2 : 1.5;
+                
                 const losLine = L.polyline([
                     [nodes[edge.u].lat, nodes[edge.u].lng], 
                     [nodes[edge.v].lat, nodes[edge.v].lng]
-                ], {color: '#888', weight: 1.5, dashArray: '5, 5', opacity: 0.6}).addTo(map);
+                ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
                 losPolylines.push(losLine);
             }
         });
@@ -385,7 +405,7 @@
         document.getElementById('btnPrim').disabled = false;
     }
 
-    // --- STAGE 2: Multi-Root MSF (With Disconnected Islands) ---
+    // --- STAGE 2: Multi-Root MSF ---
     function runPrimsAlgorithm() {
         const pops = getPopIndices();
         const threshold = parseFloat(document.getElementById('angleThreshold').value);
@@ -395,7 +415,7 @@
 
         let inTree = new Set(pops);
         let treeOfNode = Array(nodes.length).fill(-1);
-        nodeOrphanStatus = Array(nodes.length).fill(false); // Reset global array
+        nodeOrphanStatus = Array(nodes.length).fill(false); 
         
         pops.forEach(p => {
             treeOfNode[p] = p;
@@ -531,12 +551,11 @@
         statusEl.innerText = `Stage 2 Complete. Stranded nodes: ${orphanCount}`;
         document.getElementById('btnCap').disabled = false;
         
-        // Clear capacity data if Stage 2 is rerun
         finalTreeEdges.forEach(edge => edge.requiredCapacity = 0);
         document.getElementById('btnExport').disabled = false; 
     }
 
-    // --- STAGE 3: Multi-Root Capacity Planning (Includes Islands) ---
+    // --- STAGE 3: Multi-Root Capacity Planning ---
     function runCapacityPlanning() {
         const pops = getPopIndices();
         const peakCap = parseFloat(document.getElementById('sitePeak').value);
@@ -584,7 +603,6 @@
                 requiredCapacity = peakCap + ((N - 1) * avgCap);
             }
 
-            // Save calculated capacity for the CSV Export
             edge.requiredCapacity = requiredCapacity;
 
             edge.polyline.unbindTooltip();

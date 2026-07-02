@@ -213,6 +213,7 @@
     }
 
     // --- Helper: Interpolate coordinates between two nodes ---
+    // --- Helper: Interpolate 50 exact coordinates between two nodes ---
 function getInterpolatedPoints(nodeA, nodeB, samples) {
     let points = [];
     for (let i = 0; i < samples; i++) {
@@ -224,18 +225,21 @@ function getInterpolatedPoints(nodeA, nodeB, samples) {
     return points;
 }
 
-// --- Updated Line of Sight with API Fallback & Earth Bulge ---
+// --- Updated Line of Sight with Explicit Arrays & Fresnel Clearance ---
 async function checkLineOfSight(nodeA, nodeB, height) {
     const SAMPLES = 50; 
     const totalDistKm = getDistance(nodeA.lat, nodeA.lng, nodeB.lat, nodeB.lng);
-    let elevations = [];
-
-    // API 1: OpenTopoData
-    const otUrl = `https://api.opentopodata.org/v1/srtm90m?locations=${nodeA.lat},${nodeA.lng}|${nodeB.lat},${nodeB.lng}&samples=${SAMPLES}`;
     
+    // Generate all 50 coordinates locally so the API can't ignore them
+    const points = getInterpolatedPoints(nodeA, nodeB, SAMPLES);
+    const locString = points.map(p => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`).join('|');
+    
+    // Force OpenTopoData to check every single coordinate
+    const otUrl = `https://api.opentopodata.org/v1/srtm90m?locations=${locString}`;
+    
+    let elevations = [];
     try {
-        // 3-second timeout so a dead API doesn't hang your whole browser
-        const otRes = await fetch(otUrl, { signal: AbortSignal.timeout(3000) });
+        const otRes = await fetch(otUrl);
         if (otRes.status === 200) {
             const otData = await otRes.json();
             if (otData.results && otData.results.length === SAMPLES) {
@@ -243,40 +247,20 @@ async function checkLineOfSight(nodeA, nodeB, height) {
             }
         }
     } catch (e) {
-        console.warn("OpenTopoData failed or timed out. Trying fallback...");
+        console.warn("Elevation API failed or timed out.");
     }
 
-    // API 2: Open-Elevation Fallback (if API 1 failed)
-    if (elevations.length === 0) {
-        try {
-            const points = getInterpolatedPoints(nodeA, nodeB, SAMPLES);
-            // Open-Elevation expects explicit lat,lng|lat,lng...
-            const locString = points.map(p => `${p.lat},${p.lng}`).join('|');
-            const oeUrl = `https://api.open-elevation.com/api/v1/lookup?locations=${locString}`;
-            
-            const oeRes = await fetch(oeUrl, { signal: AbortSignal.timeout(5000) });
-            if (oeRes.status === 200) {
-                const oeData = await oeRes.json();
-                if (oeData.results && oeData.results.length === SAMPLES) {
-                    elevations = oeData.results.map(r => r.elevation);
-                }
-            }
-        } catch (e) {
-            console.error("Both elevation APIs failed. Failing link to be safe.");
-            return false; // Fail closed if both APIs go down
-        }
-    }
-
-    // If both failed to return valid arrays, fail the link
+    // Fail closed if the API didn't return our exact 50 points
     if (elevations.length < SAMPLES) return false;
 
-    // --- Process the elevations with Earth Bulge ---
+    // --- Process Terrain, Earth Bulge, and Fresnel Zone ---
     const hA = elevations[0] + height;
     const hB = elevations[SAMPLES - 1] + height;
     const K_FACTOR = 1.333; // 4/3 Earth radius refraction
+    const FREQ_GHZ = 18;    // Default microwave frequency for Fresnel
     
     for (let i = 1; i < SAMPLES - 1; i++) {
-        // 1. Where the beam SHOULD be (linear interpolation)
+        // 1. Where the center of the beam SHOULD be (linear interpolation)
         const expectedLineElevation = hA + ((hB - hA) * (i / (SAMPLES - 1)));
         
         // 2. Earth Bulge offset
@@ -284,16 +268,21 @@ async function checkLineOfSight(nodeA, nodeB, height) {
         const d2 = totalDistKm - d1;
         const earthBulge = (d1 * d2) / (12.75 * K_FACTOR);
         
-        // 3. Effective ground height blocking the beam
-        const actualGround = elevations[i] + earthBulge;
+        // 3. Fresnel Zone (60% Clearance required)
+        const f1 = 17.32 * Math.sqrt((d1 * d2) / (FREQ_GHZ * totalDistKm));
+        const fresnelClearance = 0.6 * f1;
+        
+        // 4. Effective ground height blocking the beam
+        const actualGround = elevations[i] + earthBulge + fresnelClearance;
         
         if (actualGround >= expectedLineElevation) {
-            return false; // Obstruction hit
+            return false; // Obstruction hit!
         }
     }
     
     return true; 
 }
+
 
 
     const sleep = ms => new Promise(r => setTimeout(r, ms));

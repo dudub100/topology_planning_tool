@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Radio Network Planner: Topology, Capacity & CSV</title>
+    <title>Radio Network Planner: Balanced MSF & Capacity</title>
     
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
@@ -43,7 +43,6 @@
         }
         .leaflet-tooltip-center::before { display: none; }
         
-        /* Legend styling */
         .legend { font-size: 11px; color: #555; background: #fff; padding: 5px; border-radius: 4px; border: 1px solid #ccc; margin-top: 10px; }
         .legend-item { display: flex; align-items: center; margin-bottom: 3px; }
         .legend-color { width: 15px; height: 3px; margin-right: 8px; }
@@ -70,7 +69,12 @@
         <input type="number" id="crossPenaltyMultiplier" value="50" min="1" step="1">
     </div>
 
-    <h2>2. Capacity Parameters</h2>
+    <h2>2. Network Balancing & Capacity</h2>
+    <div class="form-group">
+        <label>Load Balancing Factor (0.0 to 1.0)</label>
+        <input type="number" id="loadPenalty" value="0.1" min="0" step="0.05">
+        <div class="note">0 = Ignore load. 0.5 = Force even distribution.</div>
+    </div>
     <div class="form-group">
         <label>Site Peak Capacity (Mbps)</label>
         <input type="number" id="sitePeak" value="500" min="1">
@@ -112,7 +116,7 @@
     <div id="status">Ready. Add nodes to begin.</div>
 
     <button id="btnLos" onclick="runLoSCheck()">Stage 1: Check Line of Sight</button>
-    <button id="btnPrim" class="btn-success" onclick="runPrimsAlgorithm()" disabled>Stage 2: Run Multi-Root MSF</button>
+    <button id="btnPrim" class="btn-success" onclick="runPrimsAlgorithm()" disabled>Stage 2: Run Balanced MSF</button>
     <button id="btnCap" class="btn-warning" onclick="runCapacityPlanning()" disabled>Stage 3: Calculate Capacity</button>
     
     <div id="results">
@@ -315,7 +319,6 @@
             console.warn("Elevation API failed.");
         }
 
-        // CONDITION 2: Failsafe if API drops, returns NaNs, or returns an array of pure 0s (flat-earth glitch)
         if (elevations.length < SAMPLES || elevations.some(isNaN) || elevations.every(e => e === 0)) {
             return 'unverified'; 
         }
@@ -340,11 +343,10 @@
             
             if (expectedLineElevation <= requiredClearanceHeight) {
                 isBlocked = true;
-                break; // Stop checking if we hit an obstruction
+                break; 
             }
         }
         
-        // CONDITION 3 (Blocked) or CONDITION 1 (Verified)
         return isBlocked ? 'blocked' : 'verified'; 
     }
 
@@ -371,7 +373,6 @@
                 checked++;
                 statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
                 
-                // Allow both Verified AND Unverified links to populate the global edges
                 if(status === 'verified' || status === 'unverified') {
                     let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
                     let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
@@ -387,7 +388,6 @@
         
         globalEdges.forEach(edge => {
             if (edge.u < edge.v) { 
-                // Color formatting based on verification status
                 const color = edge.status === 'verified' ? '#28a745' : '#000000';
                 const opacity = edge.status === 'verified' ? 0.6 : 0.4;
                 const weight = edge.status === 'verified' ? 2 : 1.5;
@@ -405,21 +405,24 @@
         document.getElementById('btnPrim').disabled = false;
     }
 
-    // --- STAGE 2: Multi-Root MSF ---
+    // --- STAGE 2: Balanced Multi-Root MSF ---
     function runPrimsAlgorithm() {
         const pops = getPopIndices();
         const threshold = parseFloat(document.getElementById('angleThreshold').value);
         const NODAL_PENALTY = parseFloat(document.getElementById('penaltyMultiplier').value);
         const CROSS_PENALTY = parseFloat(document.getElementById('crossPenaltyMultiplier').value);
+        const LOAD_PENALTY = parseFloat(document.getElementById('loadPenalty').value) || 0;
         const statusEl = document.getElementById('status');
 
         let inTree = new Set(pops);
         let treeOfNode = Array(nodes.length).fill(-1);
+        let treeSize = Array(nodes.length).fill(0); // Track size for load balancing
         nodeOrphanStatus = Array(nodes.length).fill(false); 
         
         pops.forEach(p => {
             treeOfNode[p] = p;
             nodeOrphanStatus[p] = false;
+            treeSize[p] = 1; // Each POP starts with size 1 (itself)
         });
 
         finalTreeEdges = []; 
@@ -440,6 +443,14 @@
                     let nodalViolates = false;
                     let crossViolates = false;
 
+                    // Apply Load Balancing Penalty (only for nodes attached to a valid POP)
+                    let parentPop = treeOfNode[edge.u];
+                    if (!nodeOrphanStatus[edge.u] && parentPop !== -1) {
+                        let currentSize = treeSize[parentPop] || 0;
+                        cost *= (1 + (LOAD_PENALTY * currentSize));
+                    }
+
+                    // Apply Nodal Penalty
                     let localMinAngle = 180;
                     for(let existingBearing of nodeBearings[edge.u]) {
                         let ang = getAngleDifference(edge.bUV, existingBearing);
@@ -450,6 +461,7 @@
                         cost *= NODAL_PENALTY;
                     }
 
+                    // Apply Crossing Penalty
                     for(let tEdge of finalTreeEdges) {
                         if (doIntersect(nodes[edge.u], nodes[edge.v], nodes[tEdge.u], nodes[tEdge.v])) {
                             let ang1 = getAngleDifference(edge.bUV, tEdge.bUV);
@@ -478,6 +490,11 @@
                 
                 treeOfNode[bestEdge.v] = treeOfNode[bestEdge.u];
                 nodeOrphanStatus[bestEdge.v] = nodeOrphanStatus[bestEdge.u];
+                
+                // Increment the size of the parent tree for load balancing
+                if (!nodeOrphanStatus[bestEdge.v] && treeOfNode[bestEdge.v] !== -1) {
+                    treeSize[treeOfNode[bestEdge.v]]++;
+                }
 
                 if(edgeNodalViolates) angleViolations++;
                 if(edgeCrossViolates) crossViolations++;
@@ -496,6 +513,7 @@
                     inTree.add(newRoot);
                     treeOfNode[newRoot] = newRoot;
                     nodeOrphanStatus[newRoot] = true;
+                    treeSize[newRoot] = 1;
                 } else {
                     break;
                 }

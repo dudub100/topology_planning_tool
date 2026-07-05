@@ -289,23 +289,35 @@
         return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
     }
 
-    // --- Resilient Fetch with Exponential Backoff ---
-    async function fetchWithRetry(url, retries = 3, delay = 1000) {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // --- HARDENED Resilient Fetch with AbortController ---
+    async function fetchWithRetry(url, retries = 3, delay = 1000, timeoutMs = 5000) {
         for (let i = 0; i < retries; i++) {
             try {
-                const response = await fetch(url);
+                // Creates a strict 5-second timeout to prevent infinite hanging
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+                
+                const response = await fetch(url, { signal: controller.signal });
+                clearTimeout(timeoutId);
+
                 if (response.status === 429) {
                     console.warn(`[API] Rate limited (429). Retrying in ${delay}ms...`);
                     await sleep(delay);
-                    delay *= 2; // Double the wait time on each failure
+                    delay *= 2; 
                     continue;
                 }
                 if (response.status === 200) {
                     return await response.json();
                 }
-                break; // Stop retrying on 400 or 500 errors
+                break; // Stop retrying if server returns a permanent error (like 404/500)
             } catch (e) {
-                if (i === retries - 1) throw e;
+                // Instead of throwing an error and crashing the app, we return null gracefully
+                if (i === retries - 1) {
+                    console.warn(`[API] Fetch failed permanently after ${retries} attempts.`, e);
+                    return null; 
+                }
                 await sleep(delay);
             }
         }
@@ -317,7 +329,7 @@
         const totalDistKm = getDistance(nodeA.lat, nodeA.lng, nodeB.lat, nodeB.lng);
         let SAMPLES = Math.floor((totalDistKm * 1000) / 90);
         if (SAMPLES < 10) SAMPLES = 10;
-        if (SAMPLES > 80) SAMPLES = 80; // Cap to prevent URL too long errors
+        if (SAMPLES > 80) SAMPLES = 80; 
         
         let lats = [];
         let lngs = [];
@@ -329,7 +341,7 @@
         
         let elevations = [];
         
-        // Try Primary API (Open-Meteo) with Retry Logic
+        // 1. Try Primary API
         const urlMeteo = `https://api.open-meteo.com/v1/elevation?latitude=${lats.join(',')}&longitude=${lngs.join(',')}`;
         const dataMeteo = await fetchWithRetry(urlMeteo);
         
@@ -337,7 +349,7 @@
             elevations = dataMeteo.elevation.map(e => parseFloat(e));
         } else {
             console.warn("[API] Primary failed. Attempting Fallback (OpenTopoData)...");
-            // Try Fallback API (OpenTopoData)
+            // 2. Try Fallback API
             const locString = lats.map((lat, i) => `${lat},${lngs[i]}`).join('|');
             const urlTopo = `https://api.opentopodata.org/v1/srtm90m?locations=${locString}`;
             const dataTopo = await fetchWithRetry(urlTopo);
@@ -347,9 +359,9 @@
             }
         }
 
-        // Failsafe: Return unverified if BOTH APIs fail, return NaNs, or return purely sea level (0s)
+        // 3. Failsafe
         if (elevations.length < SAMPLES || elevations.some(isNaN) || elevations.every(e => e === 0)) {
-            console.error(`[LoS] API completely failed for link. Marking as unverified.`);
+            console.warn(`[LoS] API completely failed for link. Marking as unverified.`);
             return 'unverified'; 
         }
 
@@ -380,8 +392,6 @@
         return isBlocked ? 'blocked' : 'verified'; 
     }
 
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
-
     async function runLoSCheck() {
         if(nodes.length < 2) return alert("Add at least 2 nodes.");
         const height = parseFloat(document.getElementById('nodeHeight').value) || 0;
@@ -396,44 +406,51 @@
         let totalChecks = (nodes.length * (nodes.length - 1)) / 2;
         let checked = 0;
 
-        for(let i = 0; i < nodes.length; i++) {
-            for(let j = i + 1; j < nodes.length; j++) {
-                // Increased base sleep to 1 second to respect free API rate limits
-                await sleep(1000); 
-                let status = await checkLineOfSight(nodes[i], nodes[j], height);
-                checked++;
-                statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
-                
-                if(status === 'verified' || status === 'unverified') {
-                    let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
-                    let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
-                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
-                    globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI, status: status });
-                    globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ, status: status });
+        try {
+            for(let i = 0; i < nodes.length; i++) {
+                for(let j = i + 1; j < nodes.length; j++) {
+                    await sleep(1000); // Strict throttle to prevent getting banned
+                    let status = await checkLineOfSight(nodes[i], nodes[j], height);
+                    checked++;
+                    statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
+                    
+                    if(status === 'verified' || status === 'unverified') {
+                        let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                        let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                        let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
+                        globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI, status: status });
+                        globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ, status: status });
+                    }
                 }
             }
+
+            losPolylines.forEach(p => map.removeLayer(p));
+            losPolylines = [];
+            
+            globalEdges.forEach(edge => {
+                if (edge.u < edge.v) { 
+                    const color = edge.status === 'verified' ? '#28a745' : '#000000';
+                    const opacity = edge.status === 'verified' ? 0.6 : 0.4;
+                    const weight = edge.status === 'verified' ? 2 : 1.5;
+                    
+                    const losLine = L.polyline([
+                        [nodes[edge.u].lat, nodes[edge.u].lng], 
+                        [nodes[edge.v].lat, nodes[edge.v].lng]
+                    ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
+                    losPolylines.push(losLine);
+                }
+            });
+
+            statusEl.innerText = "Stage 1 Complete. Ready for Stage 2.";
+            
+        } catch (error) {
+            console.error("Critical error in LoS loop:", error);
+            statusEl.innerText = "Calculation error. Check console.";
+        } finally {
+            // FINALLY BLOCK: Guarantees the buttons unlock even if the internet drops mid-calculation
+            document.getElementById('btnLos').disabled = false;
+            document.getElementById('btnPrim').disabled = false;
         }
-
-        losPolylines.forEach(p => map.removeLayer(p));
-        losPolylines = [];
-        
-        globalEdges.forEach(edge => {
-            if (edge.u < edge.v) { 
-                const color = edge.status === 'verified' ? '#28a745' : '#000000';
-                const opacity = edge.status === 'verified' ? 0.6 : 0.4;
-                const weight = edge.status === 'verified' ? 2 : 1.5;
-                
-                const losLine = L.polyline([
-                    [nodes[edge.u].lat, nodes[edge.u].lng], 
-                    [nodes[edge.v].lat, nodes[edge.v].lng]
-                ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
-                losPolylines.push(losLine);
-            }
-        });
-
-        statusEl.innerText = "Stage 1 Complete. Ready for Stage 2.";
-        document.getElementById('btnLos').disabled = false;
-        document.getElementById('btnPrim').disabled = false;
     }
 
     // --- STAGE 2: Balanced Multi-Root MSF ---

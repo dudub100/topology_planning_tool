@@ -7,10 +7,16 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
     
     <style>
-        body, html { margin: 0; padding: 0; font-family: Arial, sans-serif; height: 100vh; width: 100vw; display: flex; overflow: hidden; }
-        #sidebar { width: 350px; height: 100vh; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; flex-shrink: 0; display: flex; flex-direction: column;}
-        #sidebar-scroll { flex-grow: 1; overflow-y: auto; }
-        #map { width: calc(100vw - 350px); height: 100vh; flex-grow: 1; z-index: 1; }
+        /* Bulletproof Flexbox Layout */
+        body, html { margin: 0; padding: 0; font-family: Arial, sans-serif; height: 100%; width: 100%; display: flex; flex-direction: row; overflow: hidden; }
+        
+        #sidebar { width: 350px; min-width: 350px; height: 100%; background: #f8f9fa; display: flex; flex-direction: column; border-right: 1px solid #ccc; z-index: 2; box-shadow: 2px 0 5px rgba(0,0,0,0.1); }
+        #sidebar-scroll { flex-grow: 1; overflow-y: auto; padding: 20px; box-sizing: border-box; }
+        #logBox { height: 150px; min-height: 150px; flex-shrink: 0; background: #1e1e1e; padding: 10px; font-family: monospace; font-size: 11px; overflow-y: auto; border-top: 2px solid #333; box-sizing: border-box; }
+        
+        #map { flex-grow: 1; height: 100%; position: relative; z-index: 1; background: #e5e3df; }
+        
+        /* General Styling */
         h2 { font-size: 16px; margin-top: 0; margin-bottom: 10px; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
         .form-group { margin-bottom: 12px; }
         label { display: block; font-weight: bold; margin-bottom: 4px; font-size: 13px; }
@@ -37,10 +43,7 @@
         .legend { font-size: 11px; color: #555; background: #fff; padding: 5px; border-radius: 4px; border: 1px solid #ccc; margin-top: 10px; }
         .legend-item { display: flex; align-items: center; margin-bottom: 3px; }
         .legend-color { width: 15px; height: 3px; margin-right: 8px; }
-        
-        /* Terminal Log Styling */
-        #logBox { height: 130px; background: #1e1e1e; border: 1px solid #444; border-radius: 4px; padding: 6px; font-family: monospace; font-size: 10px; overflow-y: auto; display: flex; flex-direction: column; margin-top: 10px;}
-        .log-msg { margin-bottom: 2px; }
+        .log-msg { margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 2px; }
     </style>
 </head>
 <body>
@@ -128,7 +131,7 @@
     </div>
     
     <div id="logBox">
-        <div class="log-msg" style="color: #666;">[System] Diagnostic log ready...</div>
+        <div class="log-msg" style="color: #888;">[System] Diagnostic log ready...</div>
     </div>
 </div>
 
@@ -137,6 +140,9 @@
 <script>
     const map = L.map('map').setView([32.175, 34.906], 12);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+
+    // Force map to recalculate dimensions after DOM settles to prevent grey boxes
+    setTimeout(() => { map.invalidateSize(); }, 500);
 
     const treeColors = ['#e6194B', '#4363d8', '#f58231', '#911eb4', '#3cb44b', '#42d4f4', '#f032e6', '#bfef45', '#fabed4'];
 
@@ -159,9 +165,9 @@
 
     function logMsg(msg, type='info') {
         const logBox = document.getElementById('logBox');
-        let color = '#00ff00'; 
-        if (type === 'warn') color = '#ffcc00'; 
-        if (type === 'error') color = '#ff3333'; 
+        let color = '#4caf50'; // green
+        if (type === 'warn') color = '#ffeb3b'; // yellow
+        if (type === 'error') color = '#f44336'; // red
         logBox.innerHTML += `<div class="log-msg" style="color: ${color}">${msg}</div>`;
         logBox.scrollTop = logBox.scrollHeight;
     }
@@ -284,4 +290,458 @@
         const p = Math.PI / 180;
         const y = Math.sin((lon2 - lon1) * p) * Math.cos(lat2 * p);
         const x = Math.cos(lat1 * p) * Math.sin(lat2 * p) - Math.sin(lat1 * p) * Math.cos(lat2 * p) * Math.cos((lon2 - lon1) * p);
-        let
+        let brng = Math.atan2(y, x) * (180 / Math.PI);
+        return (brng + 360) % 360;
+    }
+    
+    function getAngleDifference(b1, b2) {
+        let diff = Math.abs(b1 - b2); return diff > 180 ? 360 - diff : diff;
+    }
+
+    function ccw(A, B, C) { return (C.lng - A.lng) * (B.lat - A.lat) > (B.lng - A.lng) * (C.lat - A.lat); }
+    function doIntersect(A, B, C, D) {
+        if ((A.lat === C.lat && A.lng === C.lng) || (A.lat === D.lat && A.lng === D.lng) || (B.lat === C.lat && B.lng === C.lng) || (B.lat === D.lat && B.lng === D.lng)) return false;
+        return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
+    }
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // --- Resilient Fetch ---
+    async function fetchWithRetry(url, apiName, linkName, retries = 3, delay = 1000, timeoutMs = 5000) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+                const response = await fetch(url, { signal: controller.signal });
+                clearTimeout(timeoutId);
+
+                if (response.status === 429) {
+                    logMsg(`[${linkName}] ${apiName} Rate Limited. Retrying in ${delay}ms...`, 'warn');
+                    await sleep(delay);
+                    delay *= 2; 
+                    continue;
+                }
+                if (response.status === 200) {
+                    logMsg(`[${linkName}] ${apiName} Success.`);
+                    return await response.json();
+                }
+                logMsg(`[${linkName}] ${apiName} Error ${response.status}.`, 'error');
+                break; 
+            } catch (e) {
+                if (i === retries - 1) {
+                    logMsg(`[${linkName}] ${apiName} Timeout/Fail.`, 'error');
+                    return null; 
+                }
+                logMsg(`[${linkName}] ${apiName} Timeout. Retrying...`, 'warn');
+                await sleep(delay);
+            }
+        }
+        return null;
+    }
+
+    // --- STAGE 1: 3-API Line of Sight Engine ---
+    async function checkLineOfSight(nodeA, nodeB, height, uIdx, vIdx) {
+        const linkName = `${uIdx}->${vIdx}`;
+        const totalDistKm = getDistance(nodeA.lat, nodeA.lng, nodeB.lat, nodeB.lng);
+        let SAMPLES = Math.floor((totalDistKm * 1000) / 90);
+        if (SAMPLES < 10) SAMPLES = 10;
+        if (SAMPLES > 80) SAMPLES = 80; 
+        
+        let lats = []; let lngs = [];
+        for (let i = 0; i < SAMPLES; i++) {
+            let fraction = i / (SAMPLES - 1);
+            lats.push((nodeA.lat + (nodeB.lat - nodeA.lat) * fraction).toFixed(5));
+            lngs.push((nodeA.lng + (nodeB.lng - nodeA.lng) * fraction).toFixed(5));
+        }
+        
+        let elevations = [];
+        
+        // 1. Primary
+        const urlMeteo = `https://api.open-meteo.com/v1/elevation?latitude=${lats.join(',')}&longitude=${lngs.join(',')}`;
+        const dataMeteo = await fetchWithRetry(urlMeteo, "Open-Meteo", linkName);
+        
+        if (dataMeteo && dataMeteo.elevation && dataMeteo.elevation.length === SAMPLES) {
+            elevations = dataMeteo.elevation.map(e => parseFloat(e));
+        } else {
+            logMsg(`[${linkName}] Primary down. Attempting TopoData...`, 'warn');
+            
+            // 2. Secondary
+            const locString = lats.map((lat, i) => `${lat},${lngs[i]}`).join('|');
+            const urlTopo = `https://api.opentopodata.org/v1/srtm90m?locations=${locString}`;
+            const dataTopo = await fetchWithRetry(urlTopo, "OpenTopoData", linkName);
+            
+            if (dataTopo && dataTopo.results && dataTopo.results.length === SAMPLES) {
+                elevations = dataTopo.results.map(r => parseFloat(r.elevation));
+            } else {
+                logMsg(`[${linkName}] Secondary down. Attempting Open-Elevation...`, 'warn');
+                
+                // 3. Tertiary
+                const urlElevation = `https://api.open-elevation.com/api/v1/lookup?locations=${locString}`;
+                const dataElevation = await fetchWithRetry(urlElevation, "Open-Elevation", linkName, 2); 
+                
+                if (dataElevation && dataElevation.results && dataElevation.results.length === SAMPLES) {
+                    elevations = dataElevation.results.map(r => parseFloat(r.elevation));
+                }
+            }
+        }
+
+        if (elevations.length < SAMPLES || elevations.some(isNaN) || elevations.every(e => e === 0)) {
+            logMsg(`[${linkName}] ALL APIs FAILED. Marking Unverified.`, 'error');
+            return 'unverified'; 
+        }
+
+        const towerHeight = parseFloat(height) || 0;
+        const hA = elevations[0] + towerHeight;
+        const hB = elevations[SAMPLES - 1] + towerHeight;
+        const K_FACTOR = 1.333; const FREQ_GHZ = 18;    
+        let isBlocked = false;
+
+        for (let i = 1; i < SAMPLES - 1; i++) {
+            const expectedLineElevation = hA + ((hB - hA) * (i / (SAMPLES - 1)));
+            const d1 = totalDistKm * (i / (SAMPLES - 1));
+            const d2 = totalDistKm - d1;
+            const earthBulge = (d1 * d2) / (12.75 * K_FACTOR);
+            const f1 = 17.32 * Math.sqrt((d1 * d2) / (FREQ_GHZ * totalDistKm));
+            const fresnelClearance = 0.6 * f1;
+            const actualGround = elevations[i] + earthBulge;
+            const requiredClearanceHeight = actualGround + fresnelClearance;
+            
+            if (expectedLineElevation <= requiredClearanceHeight) {
+                isBlocked = true;
+                break; 
+            }
+        }
+        
+        return isBlocked ? 'blocked' : 'verified'; 
+    }
+
+    async function runLoSCheck() {
+        if(nodes.length < 2) return alert("Add at least 2 nodes.");
+        const height = parseFloat(document.getElementById('nodeHeight').value) || 0;
+        const statusEl = document.getElementById('status');
+        
+        document.getElementById('btnLos').disabled = true;
+        document.getElementById('btnSkip').disabled = true;
+        document.getElementById('btnPrim').disabled = true;
+        document.getElementById('btnCap').disabled = true;
+        document.getElementById('meshLegend').style.display = 'block';
+        
+        losPolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
+        globalEdges = [];
+        
+        let totalChecks = (nodes.length * (nodes.length - 1)) / 2;
+        let checked = 0;
+        logMsg("--- Starting API LoS Check ---");
+
+        try {
+            for(let i = 0; i < nodes.length; i++) {
+                for(let j = i + 1; j < nodes.length; j++) {
+                    const cacheKey = getCacheKey(nodes[i], nodes[j]);
+                    let status = losCache[cacheKey];
+
+                    if (status !== 'verified' && status !== 'blocked') {
+                        await sleep(1000); 
+                        status = await checkLineOfSight(nodes[i], nodes[j], height, i, j);
+                        losCache[cacheKey] = status; 
+                    } else {
+                        logMsg(`[Link ${i}->${j}] Retrieved from Memory: ${status}`);
+                    }
+                    
+                    checked++;
+                    statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
+                    
+                    if(status === 'verified' || status === 'unverified') {
+                        let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                        let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                        let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
+                        globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI, status: status });
+                        globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ, status: status });
+                        
+                        const color = status === 'verified' ? '#28a745' : '#000000';
+                        const opacity = status === 'verified' ? 0.6 : 0.4;
+                        const weight = status === 'verified' ? 2 : 1.5;
+                        
+                        const losLine = L.polyline([
+                            [nodes[i].lat, nodes[i].lng], 
+                            [nodes[j].lat, nodes[j].lng]
+                        ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
+                        losPolylines.push(losLine);
+                    }
+                }
+            }
+            statusEl.innerText = "Stage 1 Complete. Ready for Stage 2.";
+        } catch (error) {
+            console.error("Critical error in LoS loop:", error);
+            statusEl.innerText = "Calculation error. Check console.";
+        } finally {
+            document.getElementById('btnLos').disabled = false;
+            document.getElementById('btnSkip').disabled = false;
+            document.getElementById('btnPrim').disabled = false;
+        }
+    }
+
+    function skipLoSCheck() {
+        if(nodes.length < 2) return alert("Add at least 2 nodes.");
+        const statusEl = document.getElementById('status');
+        
+        losPolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
+        globalEdges = [];
+        document.getElementById('meshLegend').style.display = 'block';
+        
+        logMsg("--- User Executed Skip LoS ---");
+        
+        for(let i = 0; i < nodes.length; i++) {
+            for(let j = i + 1; j < nodes.length; j++) {
+                const cacheKey = getCacheKey(nodes[i], nodes[j]);
+                let status = losCache[cacheKey] || 'unverified';
+                
+                if(status === 'verified' || status === 'unverified') {
+                    let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
+                    globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI, status: status });
+                    globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ, status: status });
+                    
+                    const color = status === 'verified' ? '#28a745' : '#000000';
+                    const opacity = status === 'verified' ? 0.6 : 0.4;
+                    const weight = status === 'verified' ? 2 : 1.5;
+                    
+                    const losLine = L.polyline([
+                        [nodes[i].lat, nodes[i].lng], 
+                        [nodes[j].lat, nodes[j].lng]
+                    ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
+                    losPolylines.push(losLine);
+                }
+            }
+        }
+        
+        statusEl.innerText = "LoS Skipped. All unverified links assumed clear.";
+        document.getElementById('btnPrim').disabled = false;
+    }
+
+    function runPrimsAlgorithm() {
+        const pops = getPopIndices();
+        const threshold = parseFloat(document.getElementById('angleThreshold').value);
+        const NODAL_PENALTY = parseFloat(document.getElementById('penaltyMultiplier').value);
+        const CROSS_PENALTY = parseFloat(document.getElementById('crossPenaltyMultiplier').value);
+        const LOAD_PENALTY = parseFloat(document.getElementById('loadPenalty').value) || 0;
+        const statusEl = document.getElementById('status');
+
+        let inTree = new Set(pops);
+        let treeOfNode = Array(nodes.length).fill(-1);
+        let treeSize = Array(nodes.length).fill(0); 
+        nodeOrphanStatus = Array(nodes.length).fill(false); 
+        
+        pops.forEach(p => {
+            treeOfNode[p] = p;
+            nodeOrphanStatus[p] = false;
+            treeSize[p] = 1; 
+        });
+
+        finalTreeEdges = []; 
+        let nodeBearings = Array(nodes.length).fill().map(() => []); 
+        let angleViolations = 0;
+        let crossViolations = 0;
+        let totalDistance = 0;
+
+        while(inTree.size < nodes.length) {
+            let bestEdge = null;
+            let minCost = Infinity;
+            let edgeNodalViolates = false;
+            let edgeCrossViolates = false;
+
+            for(let edge of globalEdges) {
+                if(inTree.has(edge.u) && !inTree.has(edge.v)) {
+                    let cost = edge.dist;
+                    let nodalViolates = false;
+                    let crossViolates = false;
+
+                    let parentPop = treeOfNode[edge.u];
+                    if (!nodeOrphanStatus[edge.u] && parentPop !== -1) {
+                        let currentSize = treeSize[parentPop] || 0;
+                        cost *= (1 + (LOAD_PENALTY * currentSize));
+                    }
+
+                    let localMinAngle = 180;
+                    for(let existingBearing of nodeBearings[edge.u]) {
+                        let ang = getAngleDifference(edge.bUV, existingBearing);
+                        if(ang < localMinAngle) localMinAngle = ang;
+                    }
+                    if(localMinAngle < threshold) {
+                        nodalViolates = true;
+                        cost *= NODAL_PENALTY;
+                    }
+
+                    for(let tEdge of finalTreeEdges) {
+                        if (doIntersect(nodes[edge.u], nodes[edge.v], nodes[tEdge.u], nodes[tEdge.v])) {
+                            let ang1 = getAngleDifference(edge.bUV, tEdge.bUV);
+                            let ang2 = getAngleDifference(edge.bUV, tEdge.bVU);
+                            if (Math.min(ang1, ang2) < threshold) {
+                                crossViolates = true;
+                                break; 
+                            }
+                        }
+                    }
+                    if(crossViolates) cost *= CROSS_PENALTY;
+
+                    if(cost < minCost) {
+                        minCost = cost;
+                        bestEdge = edge;
+                        edgeNodalViolates = nodalViolates;
+                        edgeCrossViolates = crossViolates;
+                    }
+                }
+            }
+
+            if(bestEdge) {
+                inTree.add(bestEdge.v);
+                finalTreeEdges.push(bestEdge);
+                totalDistance += bestEdge.dist;
+                
+                treeOfNode[bestEdge.v] = treeOfNode[bestEdge.u];
+                nodeOrphanStatus[bestEdge.v] = nodeOrphanStatus[bestEdge.u];
+                
+                if (!nodeOrphanStatus[bestEdge.v] && treeOfNode[bestEdge.v] !== -1) {
+                    treeSize[treeOfNode[bestEdge.v]]++;
+                }
+
+                if(edgeNodalViolates) angleViolations++;
+                if(edgeCrossViolates) crossViolations++;
+
+                nodeBearings[bestEdge.u].push(bestEdge.bUV);
+                nodeBearings[bestEdge.v].push(bestEdge.bVU);
+            } else {
+                let newRoot = -1;
+                for(let i=0; i<nodes.length; i++) {
+                    if(!inTree.has(i)) {
+                        newRoot = i;
+                        break;
+                    }
+                }
+                if(newRoot !== -1) {
+                    inTree.add(newRoot);
+                    treeOfNode[newRoot] = newRoot;
+                    nodeOrphanStatus[newRoot] = true;
+                    treeSize[newRoot] = 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        treePolylines.forEach(p => map.removeLayer(p));
+        treePolylines = [];
+
+        finalTreeEdges.forEach(edge => {
+            let violates = false;
+            let othersU = nodeBearings[edge.u].filter(b => b !== edge.bUV);
+            for(let b of othersU) { if(getAngleDifference(b, edge.bUV) < threshold) violates = true; }
+            for(let tEdge of finalTreeEdges) {
+                if (edge !== tEdge && doIntersect(nodes[edge.u], nodes[edge.v], nodes[tEdge.u], nodes[tEdge.v])) {
+                    if (Math.min(getAngleDifference(edge.bUV, tEdge.bUV), getAngleDifference(edge.bUV, tEdge.bVU)) < threshold) violates = true;
+                }
+            }
+
+            const popColorIndex = pops.indexOf(treeOfNode[edge.u]);
+            const baseColor = popColorIndex !== -1 ? treeColors[popColorIndex % treeColors.length] : '#333';
+            
+            let color = baseColor;
+            let weight = 4;
+            let dashArray = null;
+
+            if (nodeOrphanStatus[edge.u]) {
+                color = '#ff0000'; 
+                dashArray = '5, 5'; 
+            }
+
+            if (violates) {
+                color = '#000'; 
+                weight = 6;
+                dashArray = '10, 5';
+            }
+
+            const line = L.polyline([
+                [nodes[edge.u].lat, nodes[edge.u].lng], 
+                [nodes[edge.v].lat, nodes[edge.v].lng]
+            ], {color: color, weight: weight, dashArray: dashArray, opacity: 1}).addTo(map);
+            
+            edge.polyline = line; 
+            treePolylines.push(line);
+        });
+
+        document.getElementById('resDistance').innerText = totalDistance.toFixed(2);
+        document.getElementById('resViolations').innerText = angleViolations;
+        document.getElementById('resCrossViolations').innerText = crossViolations;
+        document.getElementById('results').style.display = 'block';
+        
+        let orphanCount = nodeOrphanStatus.filter(v => v).length;
+        statusEl.innerText = `Stage 2 Complete. Stranded nodes: ${orphanCount}`;
+        document.getElementById('btnCap').disabled = false;
+        
+        finalTreeEdges.forEach(edge => edge.requiredCapacity = 0);
+        document.getElementById('btnExport').disabled = false; 
+    }
+
+    function runCapacityPlanning() {
+        const pops = getPopIndices();
+        const peakCap = parseFloat(document.getElementById('sitePeak').value);
+        const avgCap = parseFloat(document.getElementById('siteAvg').value);
+        const mode = document.getElementById('capacityMode').value;
+        const statusEl = document.getElementById('status');
+
+        let adj = Array(nodes.length).fill().map(() => []);
+        finalTreeEdges.forEach(edge => {
+            adj[edge.u].push(edge.v);
+            adj[edge.v].push(edge.u);
+        });
+
+        let subtreeSize = Array(nodes.length).fill(0);
+        let parentOf = Array(nodes.length).fill(-1);
+
+        function dfs(curr, parent) {
+            parentOf[curr] = parent;
+            let size = 1; 
+            for(let nxt of adj[curr]) {
+                if(nxt !== parent) size += dfs(nxt, curr);
+            }
+            subtreeSize[curr] = size;
+            return size;
+        }
+
+        pops.forEach(popIdx => {
+            if (popIdx < nodes.length) dfs(popIdx, -1);
+        });
+
+        for(let i = 0; i < nodes.length; i++) {
+            if(parentOf[i] === -1 && adj[i].length > 0) {
+                dfs(i, -1);
+            }
+        }
+
+        finalTreeEdges.forEach(edge => {
+            let childNode = (parentOf[edge.u] === edge.v) ? edge.u : edge.v;
+            let N = subtreeSize[childNode];
+            let requiredCapacity = 0;
+
+            if (mode === 'regular') {
+                requiredCapacity = Math.max(N * avgCap, peakCap);
+            } else if (mode === 'conservative') {
+                requiredCapacity = peakCap + ((N - 1) * avgCap);
+            }
+
+            edge.requiredCapacity = requiredCapacity;
+
+            edge.polyline.unbindTooltip();
+            edge.polyline.bindTooltip(`${requiredCapacity} Mbps`, {
+                permanent: true, direction: 'center', className: 'capacity-label'
+            }).openTooltip();
+        });
+
+        statusEl.innerText = "Stage 3 Complete. Capacities generated.";
+    }
+</script>
+
+</body>
+</html>

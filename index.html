@@ -8,7 +8,8 @@
     
     <style>
         body, html { margin: 0; padding: 0; font-family: Arial, sans-serif; height: 100vh; width: 100vw; display: flex; overflow: hidden; }
-        #sidebar { width: 350px; height: 100vh; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; flex-shrink: 0; }
+        #sidebar { width: 350px; height: 100vh; background: #f8f9fa; padding: 20px; box-sizing: border-box; overflow-y: auto; border-right: 1px solid #ccc; flex-shrink: 0; display: flex; flex-direction: column;}
+        #sidebar-scroll { flex-grow: 1; overflow-y: auto; }
         #map { width: calc(100vw - 350px); height: 100vh; flex-grow: 1; z-index: 1; }
         h2 { font-size: 16px; margin-top: 0; margin-bottom: 10px; color: #333; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
         .form-group { margin-bottom: 12px; }
@@ -24,106 +25,110 @@
         .btn-warning:hover { background: #e0a800; }
         .btn-info { background: #17a2b8; }
         .btn-info:hover { background: #138496; }
-        .btn-secondary { background: #6c757d; margin-top: 10px; }
+        .btn-secondary { background: #6c757d; }
         .btn-secondary:hover { background: #5a6268; }
         .note { font-size: 11px; color: #666; margin-top: 2px; }
         #results { margin-top: 15px; padding: 10px; background: #e9ecef; border-radius: 4px; display: none; font-size: 14px; }
         #status { font-weight: bold; color: #d9534f; margin-top: 5px; font-size: 13px; padding-bottom: 10px;}
         
-        .capacity-label {
-            background-color: rgba(255, 255, 255, 0.9);
-            border: 1px solid #333;
-            border-radius: 4px;
-            font-weight: bold;
-            color: #000;
-            font-size: 11px;
-            padding: 2px 5px;
-            white-space: nowrap;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-        }
+        .capacity-label { background-color: rgba(255, 255, 255, 0.9); border: 1px solid #333; border-radius: 4px; font-weight: bold; color: #000; font-size: 11px; padding: 2px 5px; white-space: nowrap; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
         .leaflet-tooltip-center::before { display: none; }
         
         .legend { font-size: 11px; color: #555; background: #fff; padding: 5px; border-radius: 4px; border: 1px solid #ccc; margin-top: 10px; }
         .legend-item { display: flex; align-items: center; margin-bottom: 3px; }
         .legend-color { width: 15px; height: 3px; margin-right: 8px; }
+        
+        /* Terminal Log Styling */
+        #logBox { height: 130px; background: #1e1e1e; border: 1px solid #444; border-radius: 4px; padding: 6px; font-family: monospace; font-size: 10px; overflow-y: auto; display: flex; flex-direction: column; margin-top: 10px;}
+        .log-msg { margin-bottom: 2px; }
     </style>
 </head>
 <body>
 
 <div id="sidebar">
-    <h2>1. RF & Interference</h2>
-    <div class="form-group">
-        <label>Node Height (Meters)</label>
-        <input type="number" id="nodeHeight" value="30" min="0">
-    </div>
-    <div class="form-group">
-        <label>Angle Threshold (Degrees)</label>
-        <input type="number" id="angleThreshold" value="90" min="0" max="180">
-    </div>
-    <div class="form-group">
-        <label>Nodal Penalty (Same Site)</label>
-        <input type="number" id="penaltyMultiplier" value="10" min="1" step="1">
-    </div>
-    <div class="form-group">
-        <label>Crossing Penalty (Spatial)</label>
-        <input type="number" id="crossPenaltyMultiplier" value="50" min="1" step="1">
-    </div>
+    <div id="sidebar-scroll">
+        <h2>1. RF & Interference</h2>
+        <div class="form-group">
+            <label>Node Height (Meters)</label>
+            <input type="number" id="nodeHeight" value="30" min="0">
+        </div>
+        <div class="form-group">
+            <label>Angle Threshold (Degrees)</label>
+            <input type="number" id="angleThreshold" value="90" min="0" max="180">
+        </div>
+        <div class="form-group">
+            <label>Nodal Penalty (Same Site)</label>
+            <input type="number" id="penaltyMultiplier" value="10" min="1" step="1">
+        </div>
+        <div class="form-group">
+            <label>Crossing Penalty (Spatial)</label>
+            <input type="number" id="crossPenaltyMultiplier" value="50" min="1" step="1">
+        </div>
 
-    <h2>2. Network Balancing & Capacity</h2>
-    <div class="form-group">
-        <label>Load Balancing Factor (0.0 to 1.0)</label>
-        <input type="number" id="loadPenalty" value="0.1" min="0" step="0.05">
-    </div>
-    <div class="form-group">
-        <label>Site Peak Capacity (Mbps)</label>
-        <input type="number" id="sitePeak" value="500" min="1">
-    </div>
-    <div class="form-group">
-        <label>Site Average Capacity (Mbps)</label>
-        <input type="number" id="siteAvg" value="100" min="1">
-    </div>
-    <div class="form-group">
-        <label>Aggregation Mode</label>
-        <select id="capacityMode">
-            <option value="regular">Regular: MAX(Sum of Avg, Peak)</option>
-            <option value="conservative">Conservative: Peak + (N-1)*Avg</option>
-        </select>
-    </div>
+        <h2>2. Network Balancing & Capacity</h2>
+        <div class="form-group">
+            <label>Load Balancing Factor (0.0 to 1.0)</label>
+            <input type="number" id="loadPenalty" value="0.1" min="0" step="0.05">
+        </div>
+        <div class="form-group">
+            <label>Site Peak Capacity (Mbps)</label>
+            <input type="number" id="sitePeak" value="500" min="1">
+        </div>
+        <div class="form-group">
+            <label>Site Average Capacity (Mbps)</label>
+            <input type="number" id="siteAvg" value="100" min="1">
+        </div>
+        <div class="form-group">
+            <label>Aggregation Mode</label>
+            <select id="capacityMode">
+                <option value="regular">Regular: MAX(Sum of Avg, Peak)</option>
+                <option value="conservative">Conservative: Peak + (N-1)*Avg</option>
+            </select>
+        </div>
 
-    <h2>3. Topology Config</h2>
-    <div class="form-group">
-        <label>POP Indices (Comma Separated)</label>
-        <input type="text" id="popIndices" value="0">
-    </div>
-    <div class="form-group">
-        <textarea id="nodeList" placeholder="Click map to add nodes..."></textarea>
-    </div>
-    
-    <div style="display: flex; gap: 5px;">
-        <button class="btn-info" onclick="syncMapFromList()" style="flex: 1;">Update Map</button>
-        <input type="file" id="csvFileInput" accept=".csv" style="display: none;" onchange="importCSV(event)">
-        <button class="btn-info" onclick="document.getElementById('csvFileInput').click()" style="flex: 1;">Upload CSV</button>
-    </div>
-    
-    <div class="legend" id="meshLegend" style="display: none;">
-        <div class="legend-item"><div class="legend-color" style="border-top: 2px dashed #28a745;"></div> Verified LoS Mesh</div>
-        <div class="legend-item"><div class="legend-color" style="border-top: 2px dashed #000;"></div> Unverified LoS Mesh (Assumed)</div>
-    </div>
-    
-    <hr>
-    
-    <div id="status">Ready. Add nodes to begin.</div>
-
-    <button id="btnLos" onclick="runLoSCheck()">Stage 1: Check Line of Sight</button>
-    <button id="btnPrim" class="btn-success" onclick="runPrimsAlgorithm()" disabled>Stage 2: Run Balanced MSF</button>
-    <button id="btnCap" class="btn-warning" onclick="runCapacityPlanning()" disabled>Stage 3: Calculate Capacity</button>
-    
-    <div id="results">
-        <p style="margin: 0 0 5px 0;"><strong>Total Network Distance:</strong> <span id="resDistance">0</span> km</p>
-        <p style="margin: 0 0 5px 0;"><strong>Nodal Violations:</strong> <span id="resViolations">0</span></p>
-        <p style="margin: 0;"><strong>Crossing Violations:</strong> <span id="resCrossViolations">0</span></p>
+        <h2>3. Topology Config</h2>
+        <div class="form-group">
+            <label>POP Indices (Comma Separated)</label>
+            <input type="text" id="popIndices" value="0">
+        </div>
+        <div class="form-group">
+            <textarea id="nodeList" placeholder="Click map to add nodes..."></textarea>
+        </div>
         
-        <button id="btnExport" class="btn-secondary" onclick="exportToCSV()" disabled>Download Topology (CSV)</button>
+        <div style="display: flex; gap: 5px;">
+            <button class="btn-info" onclick="syncMapFromList()" style="flex: 1;">Update Map</button>
+            <input type="file" id="csvFileInput" accept=".csv" style="display: none;" onchange="importCSV(event)">
+            <button class="btn-info" onclick="document.getElementById('csvFileInput').click()" style="flex: 1;">Upload CSV</button>
+        </div>
+        
+        <div class="legend" id="meshLegend" style="display: none;">
+            <div class="legend-item"><div class="legend-color" style="border-top: 2px dashed #28a745;"></div> Verified LoS</div>
+            <div class="legend-item"><div class="legend-color" style="border-top: 2px dashed #000;"></div> Unverified (Assumed)</div>
+        </div>
+        
+        <hr>
+        
+        <div id="status">Ready. Add nodes to begin.</div>
+
+        <div style="display: flex; gap: 5px; margin-bottom: 8px;">
+            <button id="btnLos" onclick="runLoSCheck()" style="flex: 2; margin: 0;">Stage 1: API LoS</button>
+            <button id="btnSkip" class="btn-secondary" onclick="skipLoSCheck()" style="flex: 1; margin: 0;">Skip (Fast)</button>
+        </div>
+        
+        <button id="btnPrim" class="btn-success" onclick="runPrimsAlgorithm()" disabled>Stage 2: Run Balanced MSF</button>
+        <button id="btnCap" class="btn-warning" onclick="runCapacityPlanning()" disabled>Stage 3: Calculate Capacity</button>
+        
+        <div id="results">
+            <p style="margin: 0 0 5px 0;"><strong>Total Network Distance:</strong> <span id="resDistance">0</span> km</p>
+            <p style="margin: 0 0 5px 0;"><strong>Nodal Violations:</strong> <span id="resViolations">0</span></p>
+            <p style="margin: 0;"><strong>Crossing Violations:</strong> <span id="resCrossViolations">0</span></p>
+            
+            <button id="btnExport" class="btn-secondary" style="margin-top: 10px;" onclick="exportToCSV()" disabled>Download Topology (CSV)</button>
+        </div>
+    </div>
+    
+    <div id="logBox">
+        <div class="log-msg" style="color: #666;">[System] Diagnostic log ready...</div>
     </div>
 </div>
 
@@ -142,6 +147,25 @@
     let globalEdges = [];
     let finalTreeEdges = []; 
     let nodeOrphanStatus = []; 
+    
+    // --- THE GLOBAL LoS CACHE ---
+    // Remembers verified/blocked links even if the map is redrawn
+    let losCache = {};
+
+    function getCacheKey(nA, nB) {
+        let s1 = `${nA.lat.toFixed(5)},${nA.lng.toFixed(5)}`;
+        let s2 = `${nB.lat.toFixed(5)},${nB.lng.toFixed(5)}`;
+        return s1 < s2 ? `${s1}|${s2}` : `${s2}|${s1}`;
+    }
+
+    function logMsg(msg, type='info') {
+        const logBox = document.getElementById('logBox');
+        let color = '#00ff00'; // default green
+        if (type === 'warn') color = '#ffcc00'; // yellow
+        if (type === 'error') color = '#ff3333'; // red
+        logBox.innerHTML += `<div class="log-msg" style="color: ${color}">${msg}</div>`;
+        logBox.scrollTop = logBox.scrollHeight;
+    }
 
     map.on('click', function(e) {
         nodes.push({ lat: e.latlng.lat, lng: e.latlng.lng });
@@ -160,23 +184,18 @@
         
         markers.forEach(m => map.removeLayer(m));
         markers = [];
-        
         const pops = getPopIndices();
         
         nodes.forEach((node, i) => {
             const isPop = pops.includes(i);
             const popColor = isPop ? treeColors[pops.indexOf(i) % treeColors.length] : '#007bff';
-            
             const marker = L.circleMarker([node.lat, node.lng], {
-                color: isPop ? '#000' : popColor, 
-                weight: isPop ? 2 : 1,
-                fillColor: popColor, 
-                fillOpacity: 0.9, 
-                radius: isPop ? 8 : 5
+                color: isPop ? '#000' : popColor, weight: isPop ? 2 : 1, fillColor: popColor, fillOpacity: 0.9, radius: isPop ? 8 : 5
             }).addTo(map).bindPopup(`Node ${i} ${isPop ? '(POP)' : ''}`);
             markers.push(marker);
         });
 
+        // Reset algorithm UI state, but keep the `losCache` intact!
         document.getElementById('btnPrim').disabled = true;
         document.getElementById('btnCap').disabled = true;
         document.getElementById('btnExport').disabled = true;
@@ -188,7 +207,7 @@
         losPolylines = [];
         treePolylines = [];
         document.getElementById('results').style.display = 'none';
-        document.getElementById('status').innerText = "Topology changed. Run Stage 1.";
+        document.getElementById('status').innerText = "Topology changed. Run Stage 1 or Skip.";
     }
 
     document.getElementById('popIndices').addEventListener('change', updateUI);
@@ -234,7 +253,6 @@
 
     function exportToCSV() {
         if(finalTreeEdges.length === 0) return alert("No network data to export.");
-        
         let csvContent = "data:text/csv;charset=utf-8,";
         csvContent += "From Node,From Lat,From Lng,To Node,To Lat,To Lng,Distance (km),Capacity (Mbps),Network Status,LoS Status\n";
         
@@ -246,10 +264,8 @@
             const row = `${edge.u},${nodes[edge.u].lat.toFixed(5)},${nodes[edge.u].lng.toFixed(5)},` +
                         `${edge.v},${nodes[edge.v].lat.toFixed(5)},${nodes[edge.v].lng.toFixed(5)},` +
                         `${edge.dist.toFixed(2)},${cap},${netStatus},${losStatus}`;
-            
             csvContent += row + "\n";
         });
-
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
@@ -261,8 +277,7 @@
 
     // --- Math & GIS Helpers ---
     function getDistance(lat1, lon1, lat2, lon2) {
-        const R = 6371; 
-        const p = Math.PI / 180;
+        const R = 6371; const p = Math.PI / 180;
         const a = 0.5 - Math.cos((lat2 - lat1) * p)/2 + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lon2 - lon1) * p))/2;
         return 2 * R * Math.asin(Math.sqrt(a));
     }
@@ -276,63 +291,59 @@
     }
     
     function getAngleDifference(b1, b2) {
-        let diff = Math.abs(b1 - b2);
-        return diff > 180 ? 360 - diff : diff;
+        let diff = Math.abs(b1 - b2); return diff > 180 ? 360 - diff : diff;
     }
 
     function ccw(A, B, C) { return (C.lng - A.lng) * (B.lat - A.lat) > (B.lng - A.lng) * (C.lat - A.lat); }
     function doIntersect(A, B, C, D) {
-        if ((A.lat === C.lat && A.lng === C.lng) || (A.lat === D.lat && A.lng === D.lng) ||
-            (B.lat === C.lat && B.lng === C.lng) || (B.lat === D.lat && B.lng === D.lng)) {
-            return false;
-        }
+        if ((A.lat === C.lat && A.lng === C.lng) || (A.lat === D.lat && A.lng === D.lng) || (B.lat === C.lat && B.lng === C.lng) || (B.lat === D.lat && B.lng === D.lng)) return false;
         return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
     }
 
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    // --- HARDENED Resilient Fetch with AbortController ---
-    async function fetchWithRetry(url, retries = 3, delay = 1000, timeoutMs = 5000) {
+    // --- Resilient Fetch with Logs ---
+    async function fetchWithRetry(url, apiName, linkName, retries = 3, delay = 1000, timeoutMs = 5000) {
         for (let i = 0; i < retries; i++) {
             try {
-                // Creates a strict 5-second timeout to prevent infinite hanging
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-                
                 const response = await fetch(url, { signal: controller.signal });
                 clearTimeout(timeoutId);
 
                 if (response.status === 429) {
-                    console.warn(`[API] Rate limited (429). Retrying in ${delay}ms...`);
+                    logMsg(`[${linkName}] ${apiName} Rate Limited. Retrying in ${delay}ms...`, 'warn');
                     await sleep(delay);
                     delay *= 2; 
                     continue;
                 }
                 if (response.status === 200) {
+                    logMsg(`[${linkName}] ${apiName} Success.`);
                     return await response.json();
                 }
-                break; // Stop retrying if server returns a permanent error (like 404/500)
+                logMsg(`[${linkName}] ${apiName} Error ${response.status}.`, 'error');
+                break; 
             } catch (e) {
-                // Instead of throwing an error and crashing the app, we return null gracefully
                 if (i === retries - 1) {
-                    console.warn(`[API] Fetch failed permanently after ${retries} attempts.`, e);
+                    logMsg(`[${linkName}] ${apiName} Timeout/Fail.`, 'error');
                     return null; 
                 }
+                logMsg(`[${linkName}] ${apiName} Timeout. Retrying...`, 'warn');
                 await sleep(delay);
             }
         }
         return null;
     }
 
-    // --- STAGE 1: Resilient Three-State Line of Sight Engine ---
-    async function checkLineOfSight(nodeA, nodeB, height) {
+    // --- STAGE 1: API Line of Sight Engine ---
+    async function checkLineOfSight(nodeA, nodeB, height, uIdx, vIdx) {
+        const linkName = `${uIdx}->${vIdx}`;
         const totalDistKm = getDistance(nodeA.lat, nodeA.lng, nodeB.lat, nodeB.lng);
         let SAMPLES = Math.floor((totalDistKm * 1000) / 90);
         if (SAMPLES < 10) SAMPLES = 10;
         if (SAMPLES > 80) SAMPLES = 80; 
         
-        let lats = [];
-        let lngs = [];
+        let lats = []; let lngs = [];
         for (let i = 0; i < SAMPLES; i++) {
             let fraction = i / (SAMPLES - 1);
             lats.push((nodeA.lat + (nodeB.lat - nodeA.lat) * fraction).toFixed(5));
@@ -343,16 +354,16 @@
         
         // 1. Try Primary API
         const urlMeteo = `https://api.open-meteo.com/v1/elevation?latitude=${lats.join(',')}&longitude=${lngs.join(',')}`;
-        const dataMeteo = await fetchWithRetry(urlMeteo);
+        const dataMeteo = await fetchWithRetry(urlMeteo, "Open-Meteo", linkName);
         
         if (dataMeteo && dataMeteo.elevation && dataMeteo.elevation.length === SAMPLES) {
             elevations = dataMeteo.elevation.map(e => parseFloat(e));
         } else {
-            console.warn("[API] Primary failed. Attempting Fallback (OpenTopoData)...");
+            logMsg(`[${linkName}] Primary down. Attempting Fallback...`, 'warn');
             // 2. Try Fallback API
             const locString = lats.map((lat, i) => `${lat},${lngs[i]}`).join('|');
             const urlTopo = `https://api.opentopodata.org/v1/srtm90m?locations=${locString}`;
-            const dataTopo = await fetchWithRetry(urlTopo);
+            const dataTopo = await fetchWithRetry(urlTopo, "OpenTopoData", linkName);
             
             if (dataTopo && dataTopo.results && dataTopo.results.length === SAMPLES) {
                 elevations = dataTopo.results.map(r => parseFloat(r.elevation));
@@ -361,16 +372,14 @@
 
         // 3. Failsafe
         if (elevations.length < SAMPLES || elevations.some(isNaN) || elevations.every(e => e === 0)) {
-            console.warn(`[LoS] API completely failed for link. Marking as unverified.`);
+            logMsg(`[${linkName}] ALL APIs FAILED. Marking Unverified.`, 'error');
             return 'unverified'; 
         }
 
         const towerHeight = parseFloat(height) || 0;
         const hA = elevations[0] + towerHeight;
         const hB = elevations[SAMPLES - 1] + towerHeight;
-        const K_FACTOR = 1.333; 
-        const FREQ_GHZ = 18;    
-        
+        const K_FACTOR = 1.333; const FREQ_GHZ = 18;    
         let isBlocked = false;
 
         for (let i = 1; i < SAMPLES - 1; i++) {
@@ -392,25 +401,42 @@
         return isBlocked ? 'blocked' : 'verified'; 
     }
 
+    // --- STAGE 1 EXECUTION (Checks Cache First) ---
     async function runLoSCheck() {
         if(nodes.length < 2) return alert("Add at least 2 nodes.");
         const height = parseFloat(document.getElementById('nodeHeight').value) || 0;
         const statusEl = document.getElementById('status');
         
         document.getElementById('btnLos').disabled = true;
+        document.getElementById('btnSkip').disabled = true;
         document.getElementById('btnPrim').disabled = true;
         document.getElementById('btnCap').disabled = true;
         document.getElementById('meshLegend').style.display = 'block';
+        
+        // Reset Map Lines, prepare to rebuild globalEdges
+        losPolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
         globalEdges = [];
         
         let totalChecks = (nodes.length * (nodes.length - 1)) / 2;
         let checked = 0;
+        logMsg("--- Starting API LoS Check ---");
 
         try {
             for(let i = 0; i < nodes.length; i++) {
                 for(let j = i + 1; j < nodes.length; j++) {
-                    await sleep(1000); // Strict throttle to prevent getting banned
-                    let status = await checkLineOfSight(nodes[i], nodes[j], height);
+                    const cacheKey = getCacheKey(nodes[i], nodes[j]);
+                    let status = losCache[cacheKey];
+
+                    // Only run API if it isn't already verified or permanently blocked
+                    if (status !== 'verified' && status !== 'blocked') {
+                        await sleep(1000); // Only throttle if we actually hit the API
+                        status = await checkLineOfSight(nodes[i], nodes[j], height, i, j);
+                        losCache[cacheKey] = status; // Save to memory
+                    } else {
+                        logMsg(`[Link ${i}->${j}] Retrieved from Memory: ${status}`);
+                    }
+                    
                     checked++;
                     statusEl.innerText = `Fetching Elevation Profiles (${checked}/${totalChecks})...`;
                     
@@ -420,37 +446,70 @@
                         let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
                         globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI, status: status });
                         globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ, status: status });
+                        
+                        const color = status === 'verified' ? '#28a745' : '#000000';
+                        const opacity = status === 'verified' ? 0.6 : 0.4;
+                        const weight = status === 'verified' ? 2 : 1.5;
+                        
+                        const losLine = L.polyline([
+                            [nodes[i].lat, nodes[i].lng], 
+                            [nodes[j].lat, nodes[j].lng]
+                        ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
+                        losPolylines.push(losLine);
                     }
                 }
             }
-
-            losPolylines.forEach(p => map.removeLayer(p));
-            losPolylines = [];
-            
-            globalEdges.forEach(edge => {
-                if (edge.u < edge.v) { 
-                    const color = edge.status === 'verified' ? '#28a745' : '#000000';
-                    const opacity = edge.status === 'verified' ? 0.6 : 0.4;
-                    const weight = edge.status === 'verified' ? 2 : 1.5;
-                    
-                    const losLine = L.polyline([
-                        [nodes[edge.u].lat, nodes[edge.u].lng], 
-                        [nodes[edge.v].lat, nodes[edge.v].lng]
-                    ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
-                    losPolylines.push(losLine);
-                }
-            });
-
             statusEl.innerText = "Stage 1 Complete. Ready for Stage 2.";
-            
         } catch (error) {
             console.error("Critical error in LoS loop:", error);
             statusEl.innerText = "Calculation error. Check console.";
         } finally {
-            // FINALLY BLOCK: Guarantees the buttons unlock even if the internet drops mid-calculation
             document.getElementById('btnLos').disabled = false;
+            document.getElementById('btnSkip').disabled = false;
             document.getElementById('btnPrim').disabled = false;
         }
+    }
+
+    // --- INSTANT SKIP / ASSUME CLEAR ---
+    function skipLoSCheck() {
+        if(nodes.length < 2) return alert("Add at least 2 nodes.");
+        const statusEl = document.getElementById('status');
+        
+        losPolylines.forEach(p => map.removeLayer(p));
+        losPolylines = [];
+        globalEdges = [];
+        document.getElementById('meshLegend').style.display = 'block';
+        
+        logMsg("--- User Executed Skip LoS ---");
+        
+        for(let i = 0; i < nodes.length; i++) {
+            for(let j = i + 1; j < nodes.length; j++) {
+                const cacheKey = getCacheKey(nodes[i], nodes[j]);
+                // Use cached status if it exists, otherwise assume 'unverified'
+                let status = losCache[cacheKey] || 'unverified';
+                
+                if(status === 'verified' || status === 'unverified') {
+                    let dist = getDistance(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingIJ = getBearing(nodes[i].lat, nodes[i].lng, nodes[j].lat, nodes[j].lng);
+                    let bearingJI = getBearing(nodes[j].lat, nodes[j].lng, nodes[i].lat, nodes[i].lng);
+                    globalEdges.push({ u: i, v: j, dist: dist, bUV: bearingIJ, bVU: bearingJI, status: status });
+                    globalEdges.push({ u: j, v: i, dist: dist, bUV: bearingJI, bVU: bearingIJ, status: status });
+                    
+                    const color = status === 'verified' ? '#28a745' : '#000000';
+                    const opacity = status === 'verified' ? 0.6 : 0.4;
+                    const weight = status === 'verified' ? 2 : 1.5;
+                    
+                    const losLine = L.polyline([
+                        [nodes[i].lat, nodes[i].lng], 
+                        [nodes[j].lat, nodes[j].lng]
+                    ], {color: color, weight: weight, dashArray: '5, 5', opacity: opacity}).addTo(map);
+                    losPolylines.push(losLine);
+                }
+            }
+        }
+        
+        statusEl.innerText = "LoS Skipped. All unverified links assumed clear.";
+        document.getElementById('btnPrim').disabled = false;
     }
 
     // --- STAGE 2: Balanced Multi-Root MSF ---
